@@ -88,4 +88,30 @@ public class ClientMessageParserTests
 
         Assert.Contains("event", ex.Message);
     }
+
+    [Fact]
+    public void Parse_Close_ThrowsWhenSubscriptionIdIsEmpty()
+    {
+        // NIP-01: "<subscription_id> is an arbitrary, non-empty string of max length 64 chars."
+        Assert.Throws<NostrProtocolException>(() => ClientMessageParser.Parse("""["CLOSE", ""]"""));
+    }
+
+    [Fact]
+    public void Parse_Close_ThrowsWhenSubscriptionIdExceeds64Characters()
+    {
+        var tooLong = new string('a', 65);
+
+        Assert.Throws<NostrProtocolException>(() => ClientMessageParser.Parse($$"""["CLOSE", "{{tooLong}}"]"""));
+    }
+
+    [Fact]
+    public void Parse_Close_AcceptsSubscriptionIdAtExactly64Characters()
+    {
+        var exactly64 = new string('a', 64);
+
+        ClientMessage message = ClientMessageParser.Parse($$"""["CLOSE", "{{exactly64}}"]""");
+
+        var close = Assert.IsType<CloseClientMessage>(message);
+        Assert.Equal(exactly64, close.SubscriptionId);
+    }
 }

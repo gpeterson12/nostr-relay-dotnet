@@ -65,7 +65,7 @@ public static class ClientMessageParser
         if (root.GetArrayLength() < 3)
             throw new NostrProtocolException("REQ must have a subscription id and at least one filter");
 
-        var subscriptionId = RequireString(root[1], "subscription_id");
+        var subscriptionId = RequireSubscriptionId(root[1]);
 
         var filters = new List<NostrFilter>();
         for (var i = 2; i < root.GetArrayLength(); i++)
@@ -79,7 +79,7 @@ public static class ClientMessageParser
         if (root.GetArrayLength() != 2)
             throw new NostrProtocolException("CLOSE must have exactly 2 elements: [\"CLOSE\", <subscription_id>]");
 
-        return new CloseClientMessage(RequireString(root[1], "subscription_id"));
+        return new CloseClientMessage(RequireSubscriptionId(root[1]));
     }
 
     private static AuthClientMessage ParseAuth(JsonElement root)
@@ -95,7 +95,7 @@ public static class ClientMessageParser
         if (root.GetArrayLength() != 3)
             throw new NostrProtocolException("COUNT must have exactly 3 elements: [\"COUNT\", <subscription_id>, <filter>]");
 
-        var subscriptionId = RequireString(root[1], "subscription_id");
+        var subscriptionId = RequireSubscriptionId(root[1]);
         var filter = Deserialize<NostrFilter>(root[2], "filter");
         return new CountClientMessage(subscriptionId, filter);
     }
@@ -106,6 +106,21 @@ public static class ClientMessageParser
             throw new NostrProtocolException($"{fieldName} must be a string");
 
         return element.GetString()!;
+    }
+
+    /// <summary>
+    /// NIP-01: "&lt;subscription_id&gt; is an arbitrary, non-empty string of max length 64 chars."
+    /// </summary>
+    private const int MaxSubscriptionIdLength = 64;
+
+    private static string RequireSubscriptionId(JsonElement element)
+    {
+        var subscriptionId = RequireString(element, "subscription_id");
+
+        if (subscriptionId.Length is 0 or > MaxSubscriptionIdLength)
+            throw new NostrProtocolException("subscription_id must be non-empty and at most 64 characters");
+
+        return subscriptionId;
     }
 
     private static T Deserialize<T>(JsonElement element, string fieldName)

@@ -25,8 +25,8 @@ public sealed class StructuralValidator : IEventValidator
         if (evt.Sig.Length != HexSigLength || !IsLowercaseHex(evt.Sig))
             return ValidationResult.Failure("invalid: sig must be 128 lowercase hex characters");
 
-        if (evt.Kind < 0)
-            return ValidationResult.Failure("invalid: kind must be a non-negative integer");
+        if (evt.Kind is < 0 or > 65535)
+            return ValidationResult.Failure("invalid: kind must be between 0 and 65535");
 
         if (evt.CreatedAt <= 0)
             return ValidationResult.Failure("invalid: created_at must be a positive unix timestamp");
