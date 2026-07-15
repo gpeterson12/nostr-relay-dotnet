@@ -1,0 +1,7 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <PackageReference Include="NBitcoin.Secp256k1" Version="4.0.1" />
+  </ItemGroup>
+
+</Project>

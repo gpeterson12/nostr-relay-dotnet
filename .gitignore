@@ -427,3 +427,24 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+relay.db*
+
+# Local config overrides
+appsettings.Development.json
+appsettings.Local.json
+.env
+
+# Docker volumes if any get created locally
+/docker/data/
+
+# JetBrains Rider
+.idea/
+*.sln.iml
+
+# VS Code
+.vscode/

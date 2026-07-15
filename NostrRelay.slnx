@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/NostrRelay.Cli/NostrRelay.Cli.csproj" />
+    <Project Path="src/NostrRelay.Core/NostrRelay.Core.csproj" />
+    <Project Path="src/NostrRelay.Server/NostrRelay.Server.csproj" />
+    <Project Path="src/NostrRelay.Storage.Abstractions/NostrRelay.Storage.Abstractions.csproj" />
+    <Project Path="src/NostrRelay.Storage.Postgres/NostrRelay.Storage.Postgres.csproj" />
+    <Project Path="src/NostrRelay.Storage.Sqlite/NostrRelay.Storage.Sqlite.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/NostrRelay.Benchmarks/NostrRelay.Benchmarks.csproj" />
+    <Project Path="tests/NostrRelay.Core.Tests/NostrRelay.Core.Tests.csproj" />
+    <Project Path="tests/NostrRelay.Server.IntegrationTests/NostrRelay.Server.IntegrationTests.csproj" />
+    <Project Path="tests/NostrRelay.Storage.Tests/NostrRelay.Storage.Tests.csproj" />
+  </Folder>
+</Solution>

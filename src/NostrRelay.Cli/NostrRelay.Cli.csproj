@@ -1,0 +1,13 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NostrRelay.Core\NostrRelay.Core.csproj" />
+    <ProjectReference Include="..\NostrRelay.Storage.Abstractions\NostrRelay.Storage.Abstractions.csproj" />
+  </ItemGroup>
+
+
+</Project>
