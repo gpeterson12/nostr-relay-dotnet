@@ -22,4 +22,8 @@ public sealed class ConnectionRegistry
 
     public bool TryGetWriter(string connectionId, out ChannelWriter<RelayMessage> writer) =>
         _outboxes.TryGetValue(connectionId, out writer!);
+
+    /// <summary>Number of currently registered (open) connections. Backs the
+    /// <c>nostr_relay_connections_active</c> metrics gauge.</summary>
+    public int Count => _outboxes.Count;
 }

@@ -4,6 +4,7 @@ using System.Threading.Channels;
 using NostrRelay.Core;
 using NostrRelay.Core.Protocol;
 using NostrRelay.Core.Validation;
+using NostrRelay.Server.Metrics;
 using NostrRelay.Server.Subscriptions;
 using NostrRelay.Storage.Abstractions;
 
@@ -33,13 +34,10 @@ public sealed class NostrConnectionHandler(
     EventBus bus,
     SubscriptionRegistry subscriptions,
     ConnectionRegistry connections,
+    RelayMetrics metrics,
     ILogger<NostrConnectionHandler> logger)
 {
     private const int ReceiveChunkBytes = 8192;
-
-    /// <summary>Raw message size cap (Section 4.3), matching the spec's
-    /// <c>Limits:MaxEventSizeBytes</c> default.</summary>
-    private const int MaxMessageBytes = 65536;
 
     /// <summary>Section 5.4: bounded outbound channel per connection, with an explicit
     /// drop policy once full. Drop-oldest rather than disconnect: a momentarily slow
@@ -51,6 +49,7 @@ public sealed class NostrConnectionHandler(
     {
         using IDisposable? _ = logger.BeginScope(new Dictionary<string, object> { ["ConnectionId"] = connectionId });
         logger.LogInformation("connection opened");
+        metrics.RecordConnectionOpened();
 
         var outbound = Channel.CreateBounded<RelayMessage>(new BoundedChannelOptions(OutboundChannelCapacity)
         {
@@ -200,7 +199,9 @@ public sealed class NostrConnectionHandler(
         ValidationResult validation = validationPipeline.Validate(evt);
         if (!validation.IsValid)
         {
-            await outbound.WriteAsync(new OkRelayMessage(evt.Id, false, validation.Reason ?? "invalid: event failed validation"), ct);
+            var reason = validation.Reason ?? "invalid: event failed validation";
+            metrics.RecordEventRejected(ReasonPrefix(reason));
+            await outbound.WriteAsync(new OkRelayMessage(evt.Id, false, reason), ct);
             return;
         }
 
@@ -212,9 +213,12 @@ public sealed class NostrConnectionHandler(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogError(ex, "failed to persist event {EventId}", evt.Id);
+            metrics.RecordEventRejected("error");
             await outbound.WriteAsync(new OkRelayMessage(evt.Id, false, "error: could not persist event"), ct);
             return;
         }
+
+        metrics.RecordEventIngested();
 
         // Broadcast genuinely new content: a freshly stored event (regular, or the new
         // latest for a replaceable/addressable key) and ephemeral events, whose only
@@ -225,6 +229,15 @@ public sealed class NostrConnectionHandler(
 
         var (accepted, message) = MapPersistResult(result);
         await outbound.WriteAsync(new OkRelayMessage(evt.Id, accepted, message), ct);
+    }
+
+    /// <summary>Extracts the standardized OK-message prefix (Section 2.2, e.g. "invalid",
+    /// "blocked") from a full reason string like "invalid: kind must be...", for grouping
+    /// the <c>nostr_relay_events_rejected_total</c> metric by reason.</summary>
+    private static string ReasonPrefix(string reason)
+    {
+        var colonIndex = reason.IndexOf(':');
+        return colonIndex > 0 ? reason[..colonIndex] : reason;
     }
 
     private static (bool Accepted, string Message) MapPersistResult(PersistResult result) => result.Outcome switch
@@ -273,8 +286,8 @@ public sealed class NostrConnectionHandler(
 
             stream.Write(buffer, 0, result.Count);
 
-            if (stream.Length > MaxMessageBytes)
-                throw new InvalidOperationException($"message exceeds maximum size of {MaxMessageBytes} bytes");
+            if (stream.Length > RelayLimits.MaxMessageBytes)
+                throw new InvalidOperationException($"message exceeds maximum size of {RelayLimits.MaxMessageBytes} bytes");
         }
         while (!result.EndOfMessage);
 

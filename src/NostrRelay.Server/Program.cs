@@ -1,6 +1,11 @@
 using System.Net.WebSockets;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using NostrRelay.Core;
 using NostrRelay.Core.Crypto;
 using NostrRelay.Core.Validation;
+using NostrRelay.Server.Info;
+using NostrRelay.Server.Metrics;
 using NostrRelay.Server.Subscriptions;
 using NostrRelay.Server.WebSockets;
 using NostrRelay.Storage.Abstractions;
@@ -35,27 +40,76 @@ builder.Services.AddSingleton<SubscriptionRegistry>();
 builder.Services.AddSingleton<ConnectionRegistry>();
 builder.Services.AddHostedService<EventFanOutService>();
 
+builder.Services.AddSingleton<RelayMetrics>();
 builder.Services.AddSingleton<NostrConnectionHandler>();
 
 WebApplication app = builder.Build();
 
 app.UseWebSockets();
 
-// Relays MUST only accept connections to a single endpoint (NIP-01); NIP-11's relay info
-// document will later be served from this same "/" path via content negotiation on the
-// Accept header (Milestone 7), so this stays a root-path map rather than "/ws" or similar.
+RelayInfoDocument relayInfoDocument = RelayInfoDocumentFactory.Create(app.Configuration);
+var relayInfoJsonOptions = new JsonSerializerOptions
+{
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+};
+
+// Section 6: three surfaces share this one root path via content negotiation, per NIP-01
+// ("relays MUST only accept connections to a single endpoint") and NIP-11 (served "on the
+// same URI as the relay's websocket"). /health and /metrics are separate, ordinary routes,
+// nothing in either NIP asks for those to share the root path.
 app.Map("/", async (HttpContext context, NostrConnectionHandler handler) =>
 {
-    if (!context.WebSockets.IsWebSocketRequest)
+    var acceptHeader = context.Request.Headers.Accept.ToString();
+
+    if (acceptHeader.Contains("application/nostr+json", StringComparison.OrdinalIgnoreCase))
     {
-        context.Response.StatusCode = StatusCodes.Status400BadRequest;
-        await context.Response.WriteAsync("This endpoint only accepts WebSocket connections.");
+        // NIP-11: "Relays MUST accept CORS requests by sending Access-Control-Allow-Origin,
+        // Access-Control-Allow-Headers, and Access-Control-Allow-Methods headers."
+        context.Response.Headers.AccessControlAllowOrigin = "*";
+        context.Response.Headers.AccessControlAllowHeaders = "*";
+        context.Response.Headers.AccessControlAllowMethods = "*";
+        context.Response.ContentType = "application/nostr+json";
+        await context.Response.WriteAsync(JsonSerializer.Serialize(relayInfoDocument, relayInfoJsonOptions));
         return;
     }
 
-    var connectionId = Guid.NewGuid().ToString("N");
-    using WebSocket socket = await context.WebSockets.AcceptWebSocketAsync();
-    await handler.HandleAsync(socket, connectionId, context.RequestAborted);
+    if (context.WebSockets.IsWebSocketRequest)
+    {
+        var connectionId = Guid.NewGuid().ToString("N");
+        using WebSocket socket = await context.WebSockets.AcceptWebSocketAsync();
+        await handler.HandleAsync(socket, connectionId, context.RequestAborted);
+        return;
+    }
+
+    context.Response.ContentType = "text/plain";
+    await context.Response.WriteAsync(
+        "This is a Nostr relay. Connect via WebSocket, or request with header " +
+        "'Accept: application/nostr+json' for relay information (NIP-11).");
+});
+
+// Section 4.4: liveness/readiness for container orchestration. Actually exercises storage
+// (an empty-filter CountAsync) rather than just confirming the process is alive, so it
+// catches "the app is up but the database is unreachable" too, not only process crashes.
+app.MapGet("/health", async (IEventStore store) =>
+{
+    try
+    {
+        await store.CountAsync(new NostrFilter(), CancellationToken.None);
+        return Results.Ok(new { status = "ok" });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(detail: ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable, title: "storage unreachable");
+    }
+});
+
+// Section 4.4: Prometheus-compatible metrics. Covers connection/subscription/event counts
+// for now; query latency histograms and storage size are deliberately not here yet, see
+// PrometheusTextFormatter's doc comment for why.
+app.MapGet("/metrics", (RelayMetrics metrics, ConnectionRegistry connections, SubscriptionRegistry subscriptions) =>
+{
+    var text = PrometheusTextFormatter.Format(metrics, connections, subscriptions);
+    return Results.Text(text, "text/plain; version=0.0.4");
 });
 
 app.Run();

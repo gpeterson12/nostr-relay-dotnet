@@ -110,8 +110,11 @@ public static class ClientMessageParser
 
     /// <summary>
     /// NIP-01: "&lt;subscription_id&gt; is an arbitrary, non-empty string of max length 64 chars."
+    /// Public rather than private: the NIP-11 relay info document's
+    /// <c>limitation.max_subid_length</c> field references this exact constant, so the two
+    /// can never drift out of sync.
     /// </summary>
-    private const int MaxSubscriptionIdLength = 64;
+    public const int MaxSubscriptionIdLength = 64;
 
     private static string RequireSubscriptionId(JsonElement element)
     {

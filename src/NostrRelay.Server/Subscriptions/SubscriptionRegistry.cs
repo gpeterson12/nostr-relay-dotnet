@@ -12,11 +12,6 @@ namespace NostrRelay.Server.Subscriptions;
 /// </summary>
 public sealed class SubscriptionRegistry
 {
-    /// <summary>Section 3.5: "practical cap should be configurable, e.g., default max 20
-    /// per connection." Hardcoded for now; becomes a real config value in Milestone 8's
-    /// policy layer.</summary>
-    private const int MaxSubscriptionsPerConnection = 20;
-
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, IReadOnlyList<NostrFilter>>> _subscriptions = new();
 
     /// <summary>
@@ -30,7 +25,7 @@ public sealed class SubscriptionRegistry
     {
         var connectionSubs = _subscriptions.GetOrAdd(connectionId, _ => new ConcurrentDictionary<string, IReadOnlyList<NostrFilter>>());
 
-        if (!connectionSubs.ContainsKey(subscriptionId) && connectionSubs.Count >= MaxSubscriptionsPerConnection)
+        if (!connectionSubs.ContainsKey(subscriptionId) && connectionSubs.Count >= RelayLimits.MaxSubscriptionsPerConnection)
             return false;
 
         connectionSubs[subscriptionId] = filters;
@@ -63,4 +58,8 @@ public sealed class SubscriptionRegistry
             }
         }
     }
+
+    /// <summary>Total active subscriptions across every connection. Backs the
+    /// <c>nostr_relay_subscriptions_active</c> metrics gauge.</summary>
+    public int TotalSubscriptionCount => _subscriptions.Values.Sum(subs => subs.Count);
 }
