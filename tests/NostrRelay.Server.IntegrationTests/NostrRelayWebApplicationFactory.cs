@@ -1,5 +1,7 @@
+using System.Net.WebSockets;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 
 namespace NostrRelay.Server.IntegrationTests;
 
@@ -15,6 +17,16 @@ public sealed class NostrRelayWebApplicationFactory : WebApplicationFactory<Prog
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseSetting("Storage:ConnectionString", $"Data Source={DatabasePath}");
+    }
+
+    /// <summary>Opens a new WebSocket connection to the in-memory server. Tests exercising
+    /// live fan-out or kind-strategy supersession typically need several of these at once
+    /// (a publisher and one or more subscribers all sharing the same underlying DI
+    /// singletons, since they're all the same factory instance).</summary>
+    public async Task<WebSocket> ConnectAsync()
+    {
+        WebSocketClient client = Server.CreateWebSocketClient();
+        return await client.ConnectAsync(new Uri(Server.BaseAddress, "/"), CancellationToken.None);
     }
 
     protected override void Dispose(bool disposing)
