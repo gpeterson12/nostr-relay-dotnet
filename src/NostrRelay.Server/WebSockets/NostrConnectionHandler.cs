@@ -42,13 +42,6 @@ public sealed class NostrConnectionHandler(
 {
     private const int ReceiveChunkBytes = 8192;
 
-    /// <summary>Section 5.4: bounded outbound channel per connection, with an explicit
-    /// drop policy once full. Drop-oldest rather than disconnect: a momentarily slow
-    /// client loses its oldest still-unsent live events rather than being kicked, which
-    /// is the friendlier default; becomes configurable alongside the rest of
-    /// RelayLimitsOptions if a real need for tuning it shows up.</summary>
-    private const int OutboundChannelCapacity = 256;
-
     private readonly RelayLimitsOptions _limits = limitsOptions.Value;
 
     public async Task HandleAsync(WebSocket socket, string connectionId, CancellationToken ct)
@@ -57,7 +50,7 @@ public sealed class NostrConnectionHandler(
         logger.LogInformation("connection opened");
         metrics.RecordConnectionOpened();
 
-        var outbound = Channel.CreateBounded<RelayMessage>(new BoundedChannelOptions(OutboundChannelCapacity)
+        var outbound = Channel.CreateBounded<RelayMessage>(new BoundedChannelOptions(_limits.OutboundChannelCapacity)
         {
             FullMode = BoundedChannelFullMode.DropOldest,
             SingleReader = true,

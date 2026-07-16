@@ -3,7 +3,6 @@ using System.Text.Json;
 using NBitcoin.Secp256k1;
 using NostrRelay.Core;
 using NostrRelay.Server.IntegrationTests.TestSupport;
-using Xunit;
 using static NostrRelay.Server.IntegrationTests.TestSupport.NostrTestEvents;
 
 namespace NostrRelay.Server.IntegrationTests;
@@ -144,5 +143,63 @@ public class PolicyAndLimitsTests
         {
             using WebSocket second = await factory.ConnectAsync();
         });
+    }
+
+    [Fact]
+    public async Task TimestampSanity_RejectsEventTooFarInFuture()
+    {
+        await using var factory = new NostrRelayWebApplicationFactory(new Dictionary<string, string?>
+        {
+            ["Limits:CreatedAtUpperLimitSeconds"] = "60",
+        });
+        using WebSocket socket = await factory.ConnectAsync();
+
+        var tooFuture = DateTimeOffset.UtcNow.AddMinutes(5).ToUnixTimeSeconds();
+        (NostrEvent evt, _) = SignEvent("too far future", createdAt: tooFuture);
+
+        await socket.SendAsync($$"""["EVENT", {{ToEventJson(evt)}}]""");
+        JsonElement response = await socket.ReceiveUntilAsync("OK");
+
+        Assert.False(response[2].GetBoolean());
+        Assert.StartsWith("invalid:", response[3].GetString());
+        Assert.Contains("future", response[3].GetString());
+    }
+
+    [Fact]
+    public async Task TimestampSanity_RejectsEventTooFarInPast()
+    {
+        await using var factory = new NostrRelayWebApplicationFactory(new Dictionary<string, string?>
+        {
+            ["Limits:CreatedAtLowerLimitSeconds"] = "60",
+        });
+        using WebSocket socket = await factory.ConnectAsync();
+
+        var tooOld = DateTimeOffset.UtcNow.AddMinutes(-5).ToUnixTimeSeconds();
+        (NostrEvent evt, _) = SignEvent("too far past", createdAt: tooOld);
+
+        await socket.SendAsync($$"""["EVENT", {{ToEventJson(evt)}}]""");
+        JsonElement response = await socket.ReceiveUntilAsync("OK");
+
+        Assert.False(response[2].GetBoolean());
+        Assert.StartsWith("invalid:", response[3].GetString());
+        Assert.Contains("past", response[3].GetString());
+    }
+
+    [Fact]
+    public async Task TimestampSanity_AcceptsEventWithinConfiguredWindow()
+    {
+        await using var factory = new NostrRelayWebApplicationFactory(new Dictionary<string, string?>
+        {
+            ["Limits:CreatedAtLowerLimitSeconds"] = "60",
+            ["Limits:CreatedAtUpperLimitSeconds"] = "60",
+        });
+        using WebSocket socket = await factory.ConnectAsync();
+
+        (NostrEvent evt, _) = SignEvent("right now", createdAt: DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+
+        await socket.SendAsync($$"""["EVENT", {{ToEventJson(evt)}}]""");
+        JsonElement response = await socket.ReceiveUntilAsync("OK");
+
+        Assert.True(response[2].GetBoolean());
     }
 }

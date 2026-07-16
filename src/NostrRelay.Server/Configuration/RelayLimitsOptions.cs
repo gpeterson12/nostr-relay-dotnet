@@ -25,4 +25,24 @@ public sealed class RelayLimitsOptions
     /// REQ subscriptions (Section 4.3: "Rate limit per connection... using a token
     /// bucket").</summary>
     public int EventRateLimitPerMinute { get; set; } = 300;
+
+    /// <summary>Section 2.3 rule 4: reject events whose created_at is older than "now
+    /// minus this many seconds". Default (~3 years) matches nostr.wine's real published
+    /// NIP-11 value, not an arbitrary guess.</summary>
+    public long CreatedAtLowerLimitSeconds { get; set; } = 94608000;
+
+    /// <summary>Reject events whose created_at is newer than "now plus this many
+    /// seconds". Default (5 minutes) matches nostr.wine's real published NIP-11 value.</summary>
+    public long CreatedAtUpperLimitSeconds { get; set; } = 300;
+
+    /// <summary>Section 5.4: bounded outbound channel capacity per connection, with a
+    /// drop-oldest policy once full (see NostrConnectionHandler). Isolates a slow client
+    /// to losing its own oldest unsent live events rather than blocking the bus or other
+    /// connections.</summary>
+    public int OutboundChannelCapacity { get; set; } = 256;
+
+    /// <summary>Section 5.3: the central event bus channel's capacity. Bounded with a
+    /// wait (not drop) policy, since dropping here loses an event for every subscriber,
+    /// not just one slow connection (see EventBus).</summary>
+    public int EventBusCapacity { get; set; } = 1000;
 }

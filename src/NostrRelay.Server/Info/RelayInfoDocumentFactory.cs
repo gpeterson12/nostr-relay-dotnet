@@ -39,6 +39,8 @@ public static class RelayInfoDocumentFactory
                 MaxSubscriptions = limits.MaxSubscriptionsPerConnection,
                 MaxSubidLength = ClientMessageParser.MaxSubscriptionIdLength,
                 DefaultLimit = RelayLimits.DefaultQueryLimit,
+                CreatedAtLowerLimit = limits.CreatedAtLowerLimitSeconds,
+                CreatedAtUpperLimit = limits.CreatedAtUpperLimitSeconds,
 
                 // Explicitly false/true rather than omitted: these are accurate,
                 // deliberate statements about the current relay's configuration, not

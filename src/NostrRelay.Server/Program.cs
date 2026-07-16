@@ -49,12 +49,18 @@ builder.Services.AddSingleton(sp =>
 {
     var signatureVerifier = sp.GetRequiredService<ISignatureVerifier>();
     RelayPolicyOptions policy = sp.GetRequiredService<IOptions<RelayPolicyOptions>>().Value;
+    RelayLimitsOptions limits = sp.GetRequiredService<IOptions<RelayLimitsOptions>>().Value;
 
     return new EventValidationPipeline([
         new StructuralValidator(),
         new IdValidator(),
         new SignatureValidator(signatureVerifier),
-        new PolicyValidator(policy.PubkeyAllowlist, policy.PubkeyBlocklist, policy.KindBlocklist),
+        new PolicyValidator(
+            policy.PubkeyAllowlist,
+            policy.PubkeyBlocklist,
+            policy.KindBlocklist,
+            limits.CreatedAtLowerLimitSeconds,
+            limits.CreatedAtUpperLimitSeconds),
     ]);
 });
 

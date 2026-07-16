@@ -37,8 +37,9 @@ public class KindStrategyTests : IAsyncLifetime
     public async Task ReplaceableEvent_NewerVersion_SupersedesOlder_ThroughRealServer()
     {
         (ECPrivKey privkey, var pubkeyHex) = GenerateKeyPair("replaceable-newer-seed");
-        NostrEvent older = SignWithKey(privkey, pubkeyHex, "old profile", kind: 0, createdAt: 100);
-        NostrEvent newer = SignWithKey(privkey, pubkeyHex, "new profile", kind: 0, createdAt: 200);
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        NostrEvent older = SignWithKey(privkey, pubkeyHex, "old profile", kind: 0, createdAt: now - 200);
+        NostrEvent newer = SignWithKey(privkey, pubkeyHex, "new profile", kind: 0, createdAt: now - 100);
 
         using WebSocket socket = await _factory.ConnectAsync();
 
@@ -62,8 +63,9 @@ public class KindStrategyTests : IAsyncLifetime
     public async Task ReplaceableEvent_OlderVersionArrivingLate_IsAcceptedButDoesNotReplaceStoredNewer()
     {
         (ECPrivKey privkey, var pubkeyHex) = GenerateKeyPair("replaceable-late-seed");
-        NostrEvent newer = SignWithKey(privkey, pubkeyHex, "current profile", kind: 0, createdAt: 200);
-        NostrEvent olderLateArrival = SignWithKey(privkey, pubkeyHex, "stale profile", kind: 0, createdAt: 100);
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        NostrEvent newer = SignWithKey(privkey, pubkeyHex, "current profile", kind: 0, createdAt: now - 100);
+        NostrEvent olderLateArrival = SignWithKey(privkey, pubkeyHex, "stale profile", kind: 0, createdAt: now - 200);
 
         using WebSocket socket = await _factory.ConnectAsync();
 
@@ -89,8 +91,9 @@ public class KindStrategyTests : IAsyncLifetime
     public async Task ReplaceableEvent_SupersededLateArrival_IsNotBroadcastLiveToSubscribers()
     {
         (ECPrivKey privkey, var pubkeyHex) = GenerateKeyPair("replaceable-fanout-seed");
-        NostrEvent newer = SignWithKey(privkey, pubkeyHex, "current profile", kind: 0, createdAt: 200);
-        NostrEvent olderLateArrival = SignWithKey(privkey, pubkeyHex, "stale profile", kind: 0, createdAt: 100);
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        NostrEvent newer = SignWithKey(privkey, pubkeyHex, "current profile", kind: 0, createdAt: now - 100);
+        NostrEvent olderLateArrival = SignWithKey(privkey, pubkeyHex, "stale profile", kind: 0, createdAt: now - 200);
 
         using WebSocket subscriber = await _factory.ConnectAsync();
         await subscriber.SendAsync($$"""["REQ", "sub1", {"authors": ["{{pubkeyHex}}"], "kinds": [0]}]""");
@@ -142,8 +145,9 @@ public class KindStrategyTests : IAsyncLifetime
     public async Task AddressableEvent_SameDTagNewerVersion_SupersedesOlder_ThroughRealServer()
     {
         (ECPrivKey privkey, var pubkeyHex) = GenerateKeyPair("addressable-supersede-seed");
-        NostrEvent v1 = SignWithKey(privkey, pubkeyHex, "draft", kind: 30023, createdAt: 100, tags: [["d", "my-article"]]);
-        NostrEvent v2 = SignWithKey(privkey, pubkeyHex, "published", kind: 30023, createdAt: 200, tags: [["d", "my-article"]]);
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        NostrEvent v1 = SignWithKey(privkey, pubkeyHex, "draft", kind: 30023, createdAt: now - 200, tags: [["d", "my-article"]]);
+        NostrEvent v2 = SignWithKey(privkey, pubkeyHex, "published", kind: 30023, createdAt: now - 100, tags: [["d", "my-article"]]);
 
         using WebSocket socket = await _factory.ConnectAsync();
 

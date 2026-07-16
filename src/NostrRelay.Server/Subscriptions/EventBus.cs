@@ -1,5 +1,7 @@
 using System.Threading.Channels;
+using Microsoft.Extensions.Options;
 using NostrRelay.Core;
+using NostrRelay.Server.Configuration;
 
 namespace NostrRelay.Server.Subscriptions;
 
@@ -15,17 +17,14 @@ namespace NostrRelay.Server.Subscriptions;
 /// (<see cref="ConnectionRegistry"/>'s targets), where dropping to one slow subscriber is
 /// an acceptable, isolated cost, dropping here would lose an event for every subscriber.
 /// </summary>
-public sealed class EventBus
+public sealed class EventBus(IOptions<RelayLimitsOptions> limitsOptions)
 {
-    private const int Capacity = 1000;
-
-    private readonly Channel<NostrEvent> _channel = Channel.CreateBounded<NostrEvent>(
-        new BoundedChannelOptions(Capacity)
-        {
-            FullMode = BoundedChannelFullMode.Wait,
-            SingleReader = true,
-            SingleWriter = false,
-        });
+    private readonly Channel<NostrEvent> _channel = Channel.CreateBounded<NostrEvent>(new BoundedChannelOptions(limitsOptions.Value.EventBusCapacity)
+    {
+        FullMode = BoundedChannelFullMode.Wait,
+        SingleReader = true,
+        SingleWriter = false,
+    });
 
     public ValueTask PublishAsync(NostrEvent evt, CancellationToken ct) => _channel.Writer.WriteAsync(evt, ct);
 
