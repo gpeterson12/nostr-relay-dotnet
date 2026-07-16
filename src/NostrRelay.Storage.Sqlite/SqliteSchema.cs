@@ -54,7 +54,29 @@ internal static class SqliteSchema
         return reader.ReadToEnd();
     }
 
-    private static IEnumerable<string> SplitStatements(string script) =>
-        script.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-              .Where(statement => statement.Length > 0);
+    /// <summary>
+    /// Splits a script into individual statements. Strips "--" line comments first,
+    /// deliberately, not incidentally: a naive split on ";" alone breaks the moment a
+    /// comment's prose happens to contain a semicolon (found the hard way in
+    /// PostgresSchema's equivalent method: an explanatory comment mentioning "...this
+    /// codebase uses; this GIN index..." was enough to chop a sentence in half and hand
+    /// the database a fragment starting mid-comment as if it were real SQL). This is a
+    /// line-based strip, not a real SQL tokenizer, it would be fooled by "--" appearing
+    /// inside a string literal; safe here because this project's own DDL never puts "--"
+    /// inside a string, not safe in general for arbitrary SQL.
+    /// </summary>
+    private static IEnumerable<string> SplitStatements(string script)
+    {
+        var withoutComments = string.Join('\n', script.Split('\n').Select(StripLineComment));
+
+        return withoutComments
+            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(statement => statement.Length > 0);
+    }
+
+    private static string StripLineComment(string line)
+    {
+        var commentIndex = line.IndexOf("--", StringComparison.Ordinal);
+        return commentIndex >= 0 ? line[..commentIndex] : line;
+    }
 }

@@ -4,20 +4,26 @@ using NostrRelay.Core.Validation;
 using NostrRelay.Server.Subscriptions;
 using NostrRelay.Server.WebSockets;
 using NostrRelay.Storage.Abstractions;
+using NostrRelay.Storage.Postgres;
 using NostrRelay.Storage.Sqlite;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
-var connectionString = builder.Configuration.GetValue<string>("Storage:ConnectionString")
-    ?? "Data Source=relay.db";
+var provider = builder.Configuration.GetValue<string>("Storage:Provider") ?? "Sqlite";
+var connectionString = builder.Configuration.GetValue<string>("Storage:ConnectionString");
 
 // Schema must exist before any request is handled, so this runs eagerly here rather than
-// as a hosted service startup task. SqliteEventStore is registered against IEventStore so
-// the rest of the app only ever depends on the storage abstraction, never the concrete type.
-var eventStore = new SqliteEventStore(connectionString);
-await eventStore.InitializeAsync();
+// as a hosted service startup task. Whichever concrete store gets built, it's registered
+// against IEventStore so the rest of the app only ever depends on the storage abstraction.
+IEventStore eventStore = provider switch
+{
+    "Sqlite" => await CreateSqliteStoreAsync(connectionString ?? "Data Source=relay.db"),
+    "Postgres" => await CreatePostgresStoreAsync(connectionString
+        ?? throw new InvalidOperationException("Storage:ConnectionString is required when Storage:Provider is \"Postgres\".")),
+    _ => throw new InvalidOperationException($"Unknown Storage:Provider \"{provider}\". Expected \"Sqlite\" or \"Postgres\".")
+};
 
-builder.Services.AddSingleton<IEventStore>(eventStore);
+builder.Services.AddSingleton(eventStore);
 builder.Services.AddSingleton<ISignatureVerifier, Secp256k1SignatureVerifier>();
 builder.Services.AddSingleton(sp => EventValidationPipeline.Default(sp.GetRequiredService<ISignatureVerifier>()));
 
@@ -53,6 +59,21 @@ app.Map("/", async (HttpContext context, NostrConnectionHandler handler) =>
 });
 
 app.Run();
+return;
+
+static async Task<IEventStore> CreateSqliteStoreAsync(string connectionString)
+{
+    var store = new SqliteEventStore(connectionString);
+    await store.InitializeAsync();
+    return store;
+}
+
+static async Task<IEventStore> CreatePostgresStoreAsync(string connectionString)
+{
+    var store = new PostgresEventStore(connectionString);
+    await store.InitializeAsync();
+    return store;
+}
 
 // Exposes the otherwise-implicit top-level-statements Program class so
 // WebApplicationFactory<Program> can find it in integration tests.
