@@ -27,15 +27,18 @@ public sealed record NostrFilter
 
     /// <summary>
     /// Evaluates whether <paramref name="evt"/> matches every constraint present on this filter.
-    /// Prefix matching applies to Ids and Authors per NIP-01 (a filter value matches if the
-    /// event field starts with it).
+    /// Per the current NIP-01 text, <c>ids</c> and <c>authors</c> filter lists "MUST contain
+    /// exact 64-character lowercase hex values", so matching here is exact equality, not
+    /// prefix matching (an earlier revision of this method used prefix matching, which
+    /// matched an older understanding of the spec; corrected after re-checking the live
+    /// NIP-01 document).
     /// </summary>
     public bool Matches(NostrEvent evt)
     {
-        if (Ids is { Count: > 0 } && !Ids.Any(prefix => evt.Id.StartsWith(prefix, StringComparison.Ordinal)))
+        if (Ids is { Count: > 0 } && !Ids.Contains(evt.Id))
             return false;
 
-        if (Authors is { Count: > 0 } && !Authors.Any(prefix => evt.Pubkey.StartsWith(prefix, StringComparison.Ordinal)))
+        if (Authors is { Count: > 0 } && !Authors.Contains(evt.Pubkey))
             return false;
 
         if (Kinds is { Count: > 0 } && !Kinds.Contains(evt.Kind))
@@ -47,21 +50,22 @@ public sealed record NostrFilter
         if (Until is { } until && evt.CreatedAt > until)
             return false;
 
-        if (TagFilters is not { Count: > 0 })
-            return true;
-        
-        foreach (var (tagName, allowedValues) in TagFilters)
+        if (TagFilters is { Count: > 0 })
         {
-            if (allowedValues.Count == 0)
-                continue;
+            foreach (var (tagName, allowedValues) in TagFilters)
+            {
+                if (allowedValues.Count == 0)
+                    continue;
 
-            var eventHasMatch = evt.Tags.Any(tag =>
-                tag is [{ Length: 1 }, _, ..] &&
-                tag[0][0] == tagName &&
-                allowedValues.Contains(tag[1]));
+                var eventHasMatch = evt.Tags.Any(tag =>
+                    tag.Count >= 2 &&
+                    tag[0].Length == 1 &&
+                    tag[0][0] == tagName &&
+                    allowedValues.Contains(tag[1]));
 
-            if (!eventHasMatch)
-                return false;
+                if (!eventHasMatch)
+                    return false;
+            }
         }
 
         return true;

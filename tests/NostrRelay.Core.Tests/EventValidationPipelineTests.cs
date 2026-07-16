@@ -53,7 +53,7 @@ public class EventValidationPipelineTests
         ValidationResult result = _pipeline.Validate(evt);
 
         Assert.False(result.IsValid);
-        Assert.Contains("kind must be a non-negative integer", result.Reason);
+        Assert.Contains("kind must be between 0 and 65535", result.Reason);
     }
 
     private static NostrEvent BuildSignedEvent()

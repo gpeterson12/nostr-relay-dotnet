@@ -39,7 +39,21 @@ public class NostrEventJsonConverterTests
         var serialized = JsonSerializer.Serialize(original, NostrJsonOptions.Default);
         var roundTripped = JsonSerializer.Deserialize<NostrEvent>(serialized, NostrJsonOptions.Default)!;
 
-        Assert.Equal(original, roundTripped);
+        // NostrEvent's record-generated Equals compares Tags via EqualityComparer<T>.Default,
+        // which is reference equality for List<T> (it doesn't override Equals). Two
+        // separately-deserialized tag lists are never reference-equal, so a whole-record
+        // Assert.Equal would fail here even on genuinely identical data. Compare fields
+        // individually instead; the per-tag Assert.Equal calls below do get proper sequence
+        // comparison from xUnit since List<string> isn't itself IEquatable<List<string>>.
+        Assert.Equal(original.Id, roundTripped.Id);
+        Assert.Equal(original.Pubkey, roundTripped.Pubkey);
+        Assert.Equal(original.CreatedAt, roundTripped.CreatedAt);
+        Assert.Equal(original.Kind, roundTripped.Kind);
+        Assert.Equal(original.Content, roundTripped.Content);
+        Assert.Equal(original.Sig, roundTripped.Sig);
+        Assert.Equal(original.Tags.Count, roundTripped.Tags.Count);
+        for (var i = 0; i < original.Tags.Count; i++)
+            Assert.Equal(original.Tags[i], roundTripped.Tags[i]);
     }
 
     [Theory]
