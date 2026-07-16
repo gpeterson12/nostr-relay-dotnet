@@ -17,7 +17,7 @@ public sealed class EventValidationPipeline(IReadOnlyList<IEventValidator> valid
         new([
             new StructuralValidator(),
             new IdValidator(),
-            new SignatureValidator(signatureVerifier)
+            new SignatureValidator(signatureVerifier),
         ]);
 
     public ValidationResult Validate(NostrEvent evt)

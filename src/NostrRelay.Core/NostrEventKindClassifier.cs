@@ -15,7 +15,7 @@ public enum NostrEventKindCategory
     Ephemeral,
 
     /// <summary>Like replaceable, but keyed on (pubkey, kind, d-tag-value) instead of just (pubkey, kind).</summary>
-    Addressable
+    Addressable,
 }
 
 /// <summary>

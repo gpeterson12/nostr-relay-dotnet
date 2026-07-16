@@ -14,7 +14,7 @@ public class StructuralValidatorTests
         Kind = kind,
         Tags = [],
         Content = "hello",
-        Sig = new string('c', 128)
+        Sig = new string('c', 128),
     };
 
     [Theory]

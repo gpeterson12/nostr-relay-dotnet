@@ -38,7 +38,7 @@ public sealed class NostrEventJsonConverter : JsonConverter<NostrEvent>
             Kind = kind,
             Tags = tags,
             Content = content,
-            Sig = sig
+            Sig = sig,
         };
     }
 

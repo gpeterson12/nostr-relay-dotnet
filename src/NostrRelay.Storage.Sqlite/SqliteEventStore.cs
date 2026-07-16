@@ -39,7 +39,7 @@ public sealed class SqliteEventStore(string connectionString) : IEventStore
             NostrEventKindCategory.Regular => await SaveRegularAsync(connection, evt, ct),
             NostrEventKindCategory.Replaceable => await SaveReplaceableAsync(connection, evt, ct),
             NostrEventKindCategory.Addressable => await SaveAddressableAsync(connection, evt, ct),
-            _ => throw new InvalidOperationException($"unhandled kind category: {category}")
+            _ => throw new InvalidOperationException($"unhandled kind category: {category}"),
         };
     }
 
@@ -174,7 +174,7 @@ public sealed class SqliteEventStore(string connectionString) : IEventStore
             evt.Content,
             evt.Sig,
             ExpiresAt = ExtractExpiresAt(evt),
-            DTag = category == NostrEventKindCategory.Addressable ? (evt.GetFirstTagValue("d") ?? "") : null
+            DTag = category == NostrEventKindCategory.Addressable ? (evt.GetFirstTagValue("d") ?? "") : null,
         };
     }
 

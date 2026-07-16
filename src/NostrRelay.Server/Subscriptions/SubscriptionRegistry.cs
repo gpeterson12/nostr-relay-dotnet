@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.Options;
 using NostrRelay.Core;
+using NostrRelay.Server.Configuration;
 
 namespace NostrRelay.Server.Subscriptions;
 
@@ -10,8 +12,10 @@ namespace NostrRelay.Server.Subscriptions;
 /// <see cref="ConnectionRegistry"/>'s job, kept separate so fan-out matching logic never
 /// needs to know anything about WebSockets.
 /// </summary>
-public sealed class SubscriptionRegistry
+public sealed class SubscriptionRegistry(IOptions<RelayLimitsOptions> limitsOptions)
 {
+    private readonly int _maxSubscriptionsPerConnection = limitsOptions.Value.MaxSubscriptionsPerConnection;
+
     private readonly ConcurrentDictionary<string, ConcurrentDictionary<string, IReadOnlyList<NostrFilter>>> _subscriptions = new();
 
     /// <summary>
@@ -25,7 +29,7 @@ public sealed class SubscriptionRegistry
     {
         var connectionSubs = _subscriptions.GetOrAdd(connectionId, _ => new ConcurrentDictionary<string, IReadOnlyList<NostrFilter>>());
 
-        if (!connectionSubs.ContainsKey(subscriptionId) && connectionSubs.Count >= RelayLimits.MaxSubscriptionsPerConnection)
+        if (!connectionSubs.ContainsKey(subscriptionId) && connectionSubs.Count >= _maxSubscriptionsPerConnection)
             return false;
 
         connectionSubs[subscriptionId] = filters;

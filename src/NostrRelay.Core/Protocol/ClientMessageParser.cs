@@ -47,7 +47,7 @@ public static class ClientMessageParser
                 "CLOSE" => ParseClose(root),
                 "AUTH" => ParseAuth(root),
                 "COUNT" => ParseCount(root),
-                _ => throw new NostrProtocolException($"unknown message type: {messageType}")
+                _ => throw new NostrProtocolException($"unknown message type: {messageType}"),
             };
         }
     }

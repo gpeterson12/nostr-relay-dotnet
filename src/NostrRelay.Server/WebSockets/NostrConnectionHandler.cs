@@ -1,18 +1,21 @@
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading.Channels;
+using Microsoft.Extensions.Options;
 using NostrRelay.Core;
 using NostrRelay.Core.Protocol;
 using NostrRelay.Core.Validation;
+using NostrRelay.Server.Configuration;
 using NostrRelay.Server.Metrics;
+using NostrRelay.Server.RateLimiting;
 using NostrRelay.Server.Subscriptions;
 using NostrRelay.Storage.Abstractions;
 
 namespace NostrRelay.Server.WebSockets;
 
 /// <summary>
-/// Handles a single accepted WebSocket connection (Section 5.3). As of Milestone 4, this
-/// is a real two-task-per-connection design:
+/// Handles a single accepted WebSocket connection (Section 5.3). Two-task-per-connection
+/// design established in Milestone 4:
 /// <list type="bullet">
 /// <item>the read loop (this method's own async context): receives frames, parses them,
 /// and either responds directly (OK/EOSE/NOTICE/CLOSED) or publishes to <see cref="EventBus"/>
@@ -21,12 +24,11 @@ namespace NostrRelay.Server.WebSockets;
 /// own bounded outbound channel and is the only code path that ever calls
 /// <see cref="WebSocket.SendAsync"/> on this socket</item>
 /// </list>
-/// Every send, whether it's a direct reply to the client's own message or a live event
-/// delivered from another connection's publish via <see cref="EventFanOutService"/>, goes
-/// through the same outbound channel. That's what makes concurrent sends from two
-/// different sources (this connection's own read loop and the shared fan-out background
-/// service) safe: <see cref="WebSocket"/> itself does not support concurrent SendAsync
-/// calls, but a single-reader channel does support concurrent writers.
+///
+/// As of Milestone 8, each connection also gets two <see cref="TokenBucketRateLimiter"/>
+/// instances (EVENT publishes and REQ subscriptions, Section 4.3: "Rate limit per
+/// connection... for both EVENT publishes and REQ subscriptions"), created fresh per
+/// connection alongside the outbound channel, sharing the same per-connection lifecycle.
 /// </summary>
 public sealed class NostrConnectionHandler(
     IEventStore eventStore,
@@ -35,6 +37,7 @@ public sealed class NostrConnectionHandler(
     SubscriptionRegistry subscriptions,
     ConnectionRegistry connections,
     RelayMetrics metrics,
+    IOptions<RelayLimitsOptions> limitsOptions,
     ILogger<NostrConnectionHandler> logger)
 {
     private const int ReceiveChunkBytes = 8192;
@@ -42,8 +45,11 @@ public sealed class NostrConnectionHandler(
     /// <summary>Section 5.4: bounded outbound channel per connection, with an explicit
     /// drop policy once full. Drop-oldest rather than disconnect: a momentarily slow
     /// client loses its oldest still-unsent live events rather than being kicked, which
-    /// is the friendlier default; becomes configurable in Milestone 8.</summary>
+    /// is the friendlier default; becomes configurable alongside the rest of
+    /// RelayLimitsOptions if a real need for tuning it shows up.</summary>
     private const int OutboundChannelCapacity = 256;
+
+    private readonly RelayLimitsOptions _limits = limitsOptions.Value;
 
     public async Task HandleAsync(WebSocket socket, string connectionId, CancellationToken ct)
     {
@@ -57,6 +63,13 @@ public sealed class NostrConnectionHandler(
             SingleReader = true,
             SingleWriter = false,
         });
+
+        // One token bucket per operation type, not one shared bucket: a burst of REQs
+        // shouldn't eat into the budget for EVENT publishes or vice versa, they're
+        // different abuse patterns with the same configured rate as a starting point.
+        TimeSpan refillPeriod = TimeSpan.FromMinutes(1);
+        var eventRateLimiter = new TokenBucketRateLimiter(_limits.EventRateLimitPerMinute, refillPeriod);
+        var reqRateLimiter = new TokenBucketRateLimiter(_limits.EventRateLimitPerMinute, refillPeriod);
 
         connections.Register(connectionId, outbound.Writer);
         Task writerTask = RunWriterAsync(socket, outbound.Reader, ct);
@@ -87,7 +100,7 @@ public sealed class NostrConnectionHandler(
                 if (message is null)
                     break; // client sent a Close frame
 
-                await ProcessMessageAsync(connectionId, outbound.Writer, message, ct);
+                await ProcessMessageAsync(connectionId, outbound.Writer, message, eventRateLimiter, reqRateLimiter, ct);
             }
         }
         catch (OperationCanceledException)
@@ -158,7 +171,13 @@ public sealed class NostrConnectionHandler(
         }
     }
 
-    private async Task ProcessMessageAsync(string connectionId, ChannelWriter<RelayMessage> outbound, string rawMessage, CancellationToken ct)
+    private async Task ProcessMessageAsync(
+        string connectionId,
+        ChannelWriter<RelayMessage> outbound,
+        string rawMessage,
+        TokenBucketRateLimiter eventRateLimiter,
+        TokenBucketRateLimiter reqRateLimiter,
+        CancellationToken ct)
     {
         ClientMessage clientMessage;
         try
@@ -174,11 +193,11 @@ public sealed class NostrConnectionHandler(
         switch (clientMessage)
         {
             case EventClientMessage eventMessage:
-                await HandleEventAsync(outbound, eventMessage.Event, ct);
+                await HandleEventAsync(outbound, eventMessage.Event, eventRateLimiter, ct);
                 break;
 
             case ReqClientMessage reqMessage:
-                await HandleReqAsync(connectionId, outbound, reqMessage, ct);
+                await HandleReqAsync(connectionId, outbound, reqMessage, reqRateLimiter, ct);
                 break;
 
             case CloseClientMessage closeMessage:
@@ -194,8 +213,21 @@ public sealed class NostrConnectionHandler(
         }
     }
 
-    private async Task HandleEventAsync(ChannelWriter<RelayMessage> outbound, NostrEvent evt, CancellationToken ct)
+    private async Task HandleEventAsync(
+        ChannelWriter<RelayMessage> outbound, NostrEvent evt, TokenBucketRateLimiter rateLimiter, CancellationToken ct)
     {
+        // Rate limit checked first, before any validation work: it's the cheapest
+        // possible rejection and protects against a flood of events regardless of
+        // whether any of them would otherwise be valid (Section 2.3's "cheap checks
+        // first" ordering philosophy applies here too, rate limiting is cheaper than
+        // structural validation).
+        if (!rateLimiter.TryConsume())
+        {
+            metrics.RecordEventRejected("rate-limited");
+            await outbound.WriteAsync(new OkRelayMessage(evt.Id, false, "rate-limited: slow down"), ct);
+            return;
+        }
+
         ValidationResult validation = validationPipeline.Validate(evt);
         if (!validation.IsValid)
         {
@@ -249,8 +281,26 @@ public sealed class NostrConnectionHandler(
         _ => (false, "error: unrecognized persistence outcome"),
     };
 
-    private async Task HandleReqAsync(string connectionId, ChannelWriter<RelayMessage> outbound, ReqClientMessage reqMessage, CancellationToken ct)
+    private async Task HandleReqAsync(
+        string connectionId,
+        ChannelWriter<RelayMessage> outbound,
+        ReqClientMessage reqMessage,
+        TokenBucketRateLimiter rateLimiter,
+        CancellationToken ct)
     {
+        if (!rateLimiter.TryConsume())
+        {
+            await outbound.WriteAsync(new ClosedRelayMessage(reqMessage.SubscriptionId, "rate-limited: slow down"), ct);
+            return;
+        }
+
+        if (reqMessage.Filters.Count > _limits.MaxFiltersPerSubscription)
+        {
+            await outbound.WriteAsync(new ClosedRelayMessage(
+                reqMessage.SubscriptionId, $"invalid: too many filters (max {_limits.MaxFiltersPerSubscription})"), ct);
+            return;
+        }
+
         if (!subscriptions.TryAddOrReplace(connectionId, reqMessage.SubscriptionId, reqMessage.Filters))
         {
             await outbound.WriteAsync(new ClosedRelayMessage(reqMessage.SubscriptionId, "error: too many subscriptions on this connection"), ct);
@@ -271,7 +321,7 @@ public sealed class NostrConnectionHandler(
         await outbound.WriteAsync(new EoseRelayMessage(reqMessage.SubscriptionId), ct);
     }
 
-    private static async Task<string?> ReceiveTextMessageAsync(WebSocket socket, CancellationToken ct)
+    private async Task<string?> ReceiveTextMessageAsync(WebSocket socket, CancellationToken ct)
     {
         var buffer = new byte[ReceiveChunkBytes];
         using var stream = new MemoryStream();
@@ -286,8 +336,8 @@ public sealed class NostrConnectionHandler(
 
             stream.Write(buffer, 0, result.Count);
 
-            if (stream.Length > RelayLimits.MaxMessageBytes)
-                throw new InvalidOperationException($"message exceeds maximum size of {RelayLimits.MaxMessageBytes} bytes");
+            if (stream.Length > _limits.MaxEventSizeBytes)
+                throw new InvalidOperationException($"message exceeds maximum size of {_limits.MaxEventSizeBytes} bytes");
         }
         while (!result.EndOfMessage);
 

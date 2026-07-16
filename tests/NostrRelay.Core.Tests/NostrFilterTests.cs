@@ -99,7 +99,7 @@ public class NostrFilterTests
             TagFilters = new Dictionary<char, IReadOnlyList<string>>
             {
                 ['e'] = ["event-1"],
-                ['p'] = ["pubkey-1"]
+                ['p'] = ["pubkey-1"],
             },
         };
 

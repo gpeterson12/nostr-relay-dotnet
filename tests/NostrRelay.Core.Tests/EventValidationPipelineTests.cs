@@ -76,7 +76,7 @@ public class EventValidationPipelineTests
             Kind = kind,
             Tags = tags,
             Content = content,
-            Sig = sigHex
+            Sig = sigHex,
         };
     }
 

@@ -16,7 +16,7 @@ public class NostrEventCanonicalSerializerTests
     private static readonly IReadOnlyList<IReadOnlyList<string>> Tags =
     [
         ["e", "abcd"],
-        ["p", "1234"]
+        ["p", "1234"],
     ];
 
     private const string ExpectedCanonical =

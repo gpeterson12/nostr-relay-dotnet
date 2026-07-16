@@ -37,7 +37,7 @@ public static class WebSocketTestClient
         using var cts = new CancellationTokenSource(timeout ?? TimeSpan.FromSeconds(5));
         while (true)
         {
-            var message = await socket.ReceiveArrayAsync(cts.Token);
+            JsonElement message = await socket.ReceiveArrayAsync(cts.Token);
             if (message[0].GetString() == type)
                 return message;
         }

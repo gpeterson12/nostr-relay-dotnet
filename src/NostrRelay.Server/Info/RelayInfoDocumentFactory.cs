@@ -1,10 +1,12 @@
 using NostrRelay.Core.Protocol;
+using NostrRelay.Server.Configuration;
 
 namespace NostrRelay.Server.Info;
 
 /// <summary>
 /// Builds the NIP-11 document once at startup from configuration (Section 5.6's "Relay"
-/// section) plus the limits this relay genuinely enforces right now.
+/// section) plus the limits and policy this relay genuinely enforces right now
+/// (<see cref="RelayLimitsOptions"/>, <see cref="RelayPolicyOptions"/>).
 ///
 /// The <c>supported_nips</c> list is deliberately conservative: it lists only NIPs with a
 /// complete, working implementation as of this milestone (1 and 11), not NIPs whose
@@ -18,7 +20,7 @@ namespace NostrRelay.Server.Info;
 /// </summary>
 public static class RelayInfoDocumentFactory
 {
-    public static RelayInfoDocument Create(IConfiguration configuration)
+    public static RelayInfoDocument Create(IConfiguration configuration, RelayLimitsOptions limits, RelayPolicyOptions policy)
     {
         IConfigurationSection relaySection = configuration.GetSection("Relay");
 
@@ -33,18 +35,24 @@ public static class RelayInfoDocumentFactory
             SupportedNips = [1, 11],
             Limitation = new RelayLimitationDocument
             {
-                MaxMessageLength = RelayLimits.MaxMessageBytes,
-                MaxSubscriptions = RelayLimits.MaxSubscriptionsPerConnection,
+                MaxMessageLength = limits.MaxEventSizeBytes,
+                MaxSubscriptions = limits.MaxSubscriptionsPerConnection,
                 MaxSubidLength = ClientMessageParser.MaxSubscriptionIdLength,
                 DefaultLimit = RelayLimits.DefaultQueryLimit,
 
-                // Explicitly false rather than omitted: these are accurate, deliberate
-                // statements about the current relay ("no auth/payment/write-restriction
-                // policy exists"), not placeholders. Compare to the fields left null above,
-                // which mean "no claim made" rather than "claim: false".
+                // Explicitly false/true rather than omitted: these are accurate,
+                // deliberate statements about the current relay's configuration, not
+                // placeholders. Compare to fields left null (max_event_tags,
+                // min_pow_difficulty, etc.), which mean "no claim made" because nothing
+                // enforces them, not "claim: false".
                 AuthRequired = false,
                 PaymentRequired = false,
-                RestrictedWrites = false,
+
+                // Accurate per NIP-11's own definition: "requires some kind of condition
+                // to be fulfilled to accept events... like belonging to a special
+                // pubkey-based whitelist". True the moment an allowlist or kind blocklist
+                // is actually configured, not hardcoded either way.
+                RestrictedWrites = policy.PubkeyAllowlist.Count > 0 || policy.KindBlocklist.Count > 0,
             },
         };
     }
