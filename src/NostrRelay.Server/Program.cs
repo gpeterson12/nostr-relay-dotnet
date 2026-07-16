@@ -1,6 +1,7 @@
 using System.Net.WebSockets;
 using NostrRelay.Core.Crypto;
 using NostrRelay.Core.Validation;
+using NostrRelay.Server.Subscriptions;
 using NostrRelay.Server.WebSockets;
 using NostrRelay.Storage.Abstractions;
 using NostrRelay.Storage.Sqlite;
@@ -19,6 +20,15 @@ await eventStore.InitializeAsync();
 builder.Services.AddSingleton<IEventStore>(eventStore);
 builder.Services.AddSingleton<ISignatureVerifier, Secp256k1SignatureVerifier>();
 builder.Services.AddSingleton(sp => EventValidationPipeline.Default(sp.GetRequiredService<ISignatureVerifier>()));
+
+// Live publish/subscribe fan-out (Section 5.3): one shared bus, one shared subscription
+// registry, one shared connection registry, all singletons since they coordinate across
+// every concurrent connection. EventFanOutService is the bus's single background reader.
+builder.Services.AddSingleton<EventBus>();
+builder.Services.AddSingleton<SubscriptionRegistry>();
+builder.Services.AddSingleton<ConnectionRegistry>();
+builder.Services.AddHostedService<EventFanOutService>();
+
 builder.Services.AddSingleton<NostrConnectionHandler>();
 
 WebApplication app = builder.Build();
