@@ -6,10 +6,12 @@
   
   <ItemGroup>
     <ProjectReference Include="..\..\src\NostrRelay.Core\NostrRelay.Core.csproj" />
+    <ProjectReference Include="..\..\src\NostrRelay.Server\NostrRelay.Server.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="BenchmarkDotNet" Version="0.15.8" />
+    <PackageReference Include="NBitcoin.Secp256k1" Version="4.0.1" />
   </ItemGroup>
 
 
