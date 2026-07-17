@@ -6,6 +6,7 @@ using NostrRelay.Core;
 using NostrRelay.Core.Crypto;
 using NostrRelay.Core.Validation;
 using NostrRelay.Server.Configuration;
+using NostrRelay.Server.Expiration;
 using NostrRelay.Server.Info;
 using NostrRelay.Server.Metrics;
 using NostrRelay.Server.Subscriptions;
@@ -33,18 +34,20 @@ IEventStore eventStore = provider switch
 builder.Services.AddSingleton(eventStore);
 builder.Services.AddSingleton<ISignatureVerifier, Secp256k1SignatureVerifier>();
 
-// Section 5.6: "Limits" and "Policy" configuration sections, bound to real options types
-// so operators can tune them via appsettings/environment variables without a rebuild.
+// Section 5.6: "Limits", "Policy", and "ExpirationSweep" configuration sections, bound to
+// real options types so operators can tune them via appsettings/environment variables
+// without a rebuild.
 builder.Services.Configure<RelayLimitsOptions>(builder.Configuration.GetSection("Limits"));
 builder.Services.Configure<RelayPolicyOptions>(builder.Configuration.GetSection("Policy"));
+builder.Services.Configure<ExpirationSweepOptions>(builder.Configuration.GetSection("ExpirationSweep"));
 
-// The full production pipeline (Section 2.3, all four implemented rules in order):
-// structural -> id -> signature -> policy. EventValidationPipeline.Default() deliberately
-// stays at just the first three (see its own doc comment); it's what Core.Tests build
-// against, and changing its signature to require policy config would break Core's
-// independence from any hosting-framework configuration type. Composing the full list
-// explicitly here, instead, is exactly the extension point Default()'s doc comment
-// anticipated back in Milestone 1.
+// The full production pipeline (Section 2.3's four rules, plus NIP-40's write-time
+// expiration check): structural -> id -> signature -> policy -> expiration.
+// EventValidationPipeline.Default() deliberately stays at just the first three (see its
+// own doc comment); it's what Core.Tests build against, and changing its signature to
+// require policy/expiration config would break Core's independence from any
+// hosting-framework configuration type. Composing the full list explicitly here, instead,
+// is exactly the extension point Default()'s doc comment anticipated back in Milestone 1.
 builder.Services.AddSingleton(sp =>
 {
     var signatureVerifier = sp.GetRequiredService<ISignatureVerifier>();
@@ -61,6 +64,7 @@ builder.Services.AddSingleton(sp =>
             policy.KindBlocklist,
             limits.CreatedAtLowerLimitSeconds,
             limits.CreatedAtUpperLimitSeconds),
+        new ExpirationValidator(),
     ]);
 });
 
@@ -71,6 +75,11 @@ builder.Services.AddSingleton<EventBus>();
 builder.Services.AddSingleton<SubscriptionRegistry>();
 builder.Services.AddSingleton<ConnectionRegistry>();
 builder.Services.AddHostedService<EventFanOutService>();
+
+// NIP-40's background sweep (Milestone 9): reclaims storage from expired events.
+// Correctness (never serving an expired event) doesn't depend on this running at any
+// particular cadence, that's enforced unconditionally at query time in the storage layer.
+builder.Services.AddHostedService<ExpirationSweepService>();
 
 builder.Services.AddSingleton<RelayMetrics>();
 builder.Services.AddSingleton<NostrConnectionHandler>();

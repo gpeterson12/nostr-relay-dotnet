@@ -1,6 +1,5 @@
 using System.Text.Json;
 using NostrRelay.Core.Protocol;
-using Xunit;
 
 namespace NostrRelay.Core.Tests.Protocol;
 

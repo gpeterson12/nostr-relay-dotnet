@@ -9,14 +9,9 @@ namespace NostrRelay.Server.Info;
 /// (<see cref="RelayLimitsOptions"/>, <see cref="RelayPolicyOptions"/>).
 ///
 /// The <c>supported_nips</c> list is deliberately conservative: it lists only NIPs with a
-/// complete, working implementation as of this milestone (1 and 11), not NIPs whose
-/// storage plumbing exists but whose protocol-level behavior isn't wired up yet. For
-/// example, NIP-40 expiration has a real <c>expires_at</c> column and
-/// <c>DeleteExpiredEventsAsync</c>, but no periodic sweep job calls it yet (Milestone 9)
-/// and no write-time validation of the "expiration" tag exists, so claiming NIP-40 support
-/// here would be true in general shape but false in the specific, checkable sense NIP-11
-/// implies. Update this list as each NIP's server-side behavior is actually completed, not
-/// when its groundwork merely exists.
+/// complete, working implementation, not NIPs whose storage plumbing exists but whose
+/// protocol-level behavior isn't wired up yet. Update this list as each NIP's server-side behavior is actually
+/// completed, not when its groundwork merely exists.
 /// </summary>
 public static class RelayInfoDocumentFactory
 {
@@ -32,7 +27,7 @@ public static class RelayInfoDocumentFactory
             Contact = NullIfEmpty(relaySection["Contact"]),
             Software = relaySection["Software"],
             Version = relaySection["Version"],
-            SupportedNips = [1, 11],
+            SupportedNips = [1, 9, 11, 40],
             Limitation = new RelayLimitationDocument
             {
                 MaxMessageLength = limits.MaxEventSizeBytes,

@@ -16,7 +16,7 @@ namespace NostrRelay.Storage.Tests;
 /// </summary>
 public abstract class EventStoreContractTests : IAsyncLifetime
 {
-    protected IEventStore Store { get; private set; } = null!;
+    private IEventStore Store { get; set; } = null!;
 
     protected abstract Task<IEventStore> CreateStoreAsync();
 
@@ -338,7 +338,125 @@ public abstract class EventStoreContractTests : IAsyncLifetime
         Assert.Single(found);
     }
 
-    // --- NIP-40 expiration sweep ---
+    // --- NIP-09 deletion requests ---
+
+    [Fact]
+    public async Task DeleteEventsAuthoredByAsync_RemovesEventWhenAuthorMatches()
+    {
+        await Store.SaveEventAsync(MakeEvent(id: "own-post", pubkey: "pubkey-u"), CancellationToken.None);
+
+        await Store.DeleteEventsAuthoredByAsync(["own-post"], "pubkey-u", CancellationToken.None);
+
+        var found = await QueryAllAsync(new NostrFilter { Ids = ["own-post"] });
+        Assert.Empty(found);
+    }
+
+    [Fact]
+    public async Task DeleteEventsAuthoredByAsync_DoesNotRemoveEventWhenAuthorDiffers()
+    {
+        await Store.SaveEventAsync(MakeEvent(id: "someone-elses-post", pubkey: "pubkey-v"), CancellationToken.None);
+
+        // A different pubkey attempting to delete pubkey-v's event.
+        await Store.DeleteEventsAuthoredByAsync(["someone-elses-post"], "pubkey-impersonator", CancellationToken.None);
+
+        var found = await QueryAllAsync(new NostrFilter { Ids = ["someone-elses-post"] });
+        Assert.Single(found);
+    }
+
+    [Fact]
+    public async Task DeleteEventsAuthoredByAsync_DoesNotDeleteKind5EventsEvenWhenAuthorMatches()
+    {
+        // NIP-09: "Publishing a deletion request event against a deletion request has no effect."
+        await Store.SaveEventAsync(MakeEvent(id: "a-deletion-request", pubkey: "pubkey-w", kind: 5), CancellationToken.None);
+
+        await Store.DeleteEventsAuthoredByAsync(["a-deletion-request"], "pubkey-w", CancellationToken.None);
+
+        var found = await QueryAllAsync(new NostrFilter { Ids = ["a-deletion-request"] });
+        Assert.Single(found);
+    }
+
+    [Fact]
+    public async Task DeleteEventsAuthoredByAsync_EmptyList_DoesNothing()
+    {
+        await Store.SaveEventAsync(MakeEvent(id: "untouched-2", pubkey: "pubkey-x"), CancellationToken.None);
+
+        await Store.DeleteEventsAuthoredByAsync([], "pubkey-x", CancellationToken.None);
+
+        var found = await QueryAllAsync(new NostrFilter { Ids = ["untouched-2"] });
+        Assert.Single(found);
+    }
+
+    [Fact]
+    public async Task DeleteAddressableEventAsync_RemovesMatchingCoordinateAtOrBeforeCreatedAt()
+    {
+        await Store.SaveEventAsync(
+            MakeEvent(id: "article-v1", pubkey: "pubkey-y", kind: 30023, createdAt: 100, tags: [["d", "my-article"]]),
+            CancellationToken.None);
+
+        await Store.DeleteAddressableEventAsync("pubkey-y", 30023, "my-article", upToCreatedAt: 200, CancellationToken.None);
+
+        var found = await QueryAllAsync(new NostrFilter { Authors = ["pubkey-y"], Kinds = [30023] });
+        Assert.Empty(found);
+    }
+
+    [Fact]
+    public async Task DeleteAddressableEventAsync_DoesNotRemoveNewerStoredVersion()
+    {
+        // A legitimate update racing ahead of an older deletion request shouldn't be
+        // undone by it.
+        await Store.SaveEventAsync(
+            MakeEvent(id: "article-v2", pubkey: "pubkey-z", kind: 30023, createdAt: 300, tags: [["d", "my-article"]]),
+            CancellationToken.None);
+
+        await Store.DeleteAddressableEventAsync("pubkey-z", 30023, "my-article", upToCreatedAt: 200, CancellationToken.None);
+
+        var found = await QueryAllAsync(new NostrFilter { Authors = ["pubkey-z"], Kinds = [30023] });
+        Assert.Single(found);
+        Assert.Equal("article-v2", found[0].Id);
+    }
+
+    [Fact]
+    public async Task DeleteAddressableEventAsync_NoMatchingCoordinate_IsNoOp()
+    {
+        await Store.SaveEventAsync(
+            MakeEvent(id: "unrelated-article", pubkey: "pubkey-aa", kind: 30023, tags: [["d", "other-article"]]),
+            CancellationToken.None);
+
+        await Store.DeleteAddressableEventAsync("pubkey-aa", 30023, "my-article", upToCreatedAt: long.MaxValue, CancellationToken.None);
+
+        var found = await QueryAllAsync(new NostrFilter { Authors = ["pubkey-aa"], Kinds = [30023] });
+        Assert.Single(found);
+    }
+
+    // --- NIP-40 expiration ---
+
+    [Fact]
+    public async Task QueryAsync_ExcludesExpiredEvents_EvenBeforeSweepRuns()
+    {
+        var past = DateTimeOffset.UtcNow.AddDays(-1).ToUnixTimeSeconds();
+
+        await Store.SaveEventAsync(
+            MakeEvent(id: "already-expired", pubkey: "pubkey-bb", tags: [["expiration", past.ToString()]]), CancellationToken.None);
+
+        // Deliberately no DeleteExpiredEventsAsync call: NIP-40 requires expired events to
+        // be excluded from query results regardless of whether the sweep has run yet.
+        var found = await QueryAllAsync(new NostrFilter { Authors = ["pubkey-bb"] });
+
+        Assert.Empty(found);
+    }
+
+    [Fact]
+    public async Task CountAsync_ExcludesExpiredEvents_EvenBeforeSweepRuns()
+    {
+        var past = DateTimeOffset.UtcNow.AddDays(-1).ToUnixTimeSeconds();
+
+        await Store.SaveEventAsync(
+            MakeEvent(pubkey: "pubkey-cc", tags: [["expiration", past.ToString()]]), CancellationToken.None);
+
+        var count = await Store.CountAsync(new NostrFilter { Authors = ["pubkey-cc"] }, CancellationToken.None);
+
+        Assert.Equal(0, count);
+    }
 
     [Fact]
     public async Task DeleteExpiredEventsAsync_RemovesOnlyExpiredEvents()

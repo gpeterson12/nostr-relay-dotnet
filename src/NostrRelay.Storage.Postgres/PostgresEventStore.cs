@@ -225,12 +225,17 @@ public sealed class PostgresEventStore(string connectionString) : IEventStore
             (var whereClause, DynamicParameters parameters) = PostgresFilterSqlBuilder.Build(filters[i], prefix);
 
             var limitParam = $"{prefix}_limit";
+            var nowParam = $"{prefix}_now";
             parameters.Add(limitParam, filters[i].Limit ?? 500);
+            parameters.Add(nowParam, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
 
+            // NIP-40: "Relays SHOULD NOT send expired events to clients, even if they are
+            // stored." Enforced on every query unconditionally, not relied on as a side
+            // effect of the periodic sweep (DeleteExpiredEventsAsync) having already run.
             var sql = $"""
                 SELECT id AS Id, pubkey AS Pubkey, created_at AS CreatedAt, kind AS Kind, tags::text AS Tags, content AS Content, sig AS Sig
                 FROM events e
-                WHERE {whereClause}
+                WHERE ({whereClause}) AND (e.expires_at IS NULL OR e.expires_at > @{nowParam})
                 ORDER BY created_at DESC, id ASC
                 LIMIT @{limitParam}
                 """;
@@ -252,8 +257,9 @@ public sealed class PostgresEventStore(string connectionString) : IEventStore
     {
         await using NpgsqlConnection connection = await OpenAsync(ct);
         (var whereClause, DynamicParameters parameters) = PostgresFilterSqlBuilder.Build(filter, "f");
+        parameters.Add("f_now", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
 
-        var sql = $"SELECT COUNT(*) FROM events e WHERE {whereClause}";
+        var sql = $"SELECT COUNT(*) FROM events e WHERE ({whereClause}) AND (e.expires_at IS NULL OR e.expires_at > @f_now)";
         return await connection.ExecuteScalarAsync<long>(new CommandDefinition(sql, parameters, cancellationToken: ct));
     }
 
@@ -266,6 +272,32 @@ public sealed class PostgresEventStore(string connectionString) : IEventStore
         await using NpgsqlConnection connection = await OpenAsync(ct);
         await connection.ExecuteAsync(new CommandDefinition(
             "DELETE FROM events WHERE id = ANY(@Ids)", new { Ids = ids }, cancellationToken: ct));
+    }
+
+    public async Task DeleteEventsAuthoredByAsync(IEnumerable<string> eventIds, string authorPubkey, CancellationToken ct)
+    {
+        var ids = eventIds as IReadOnlyCollection<string> ?? eventIds.ToList();
+        if (ids.Count == 0)
+            return;
+
+        await using NpgsqlConnection connection = await OpenAsync(ct);
+
+        // "AND kind != 5" enforces NIP-09's "deletion request against a deletion request
+        // has no effect": a kind-5 row is never deletable through this path.
+        await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM events WHERE id = ANY(@Ids) AND pubkey = @AuthorPubkey AND kind != 5",
+            new { Ids = ids, AuthorPubkey = authorPubkey },
+            cancellationToken: ct));
+    }
+
+    public async Task DeleteAddressableEventAsync(string pubkey, int kind, string dTag, long upToCreatedAt, CancellationToken ct)
+    {
+        await using NpgsqlConnection connection = await OpenAsync(ct);
+
+        await connection.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM events WHERE pubkey = @Pubkey AND kind = @Kind AND d_tag = @DTag AND created_at <= @UpToCreatedAt",
+            new { Pubkey = pubkey, Kind = kind, DTag = dTag, UpToCreatedAt = upToCreatedAt },
+            cancellationToken: ct));
     }
 
     public async Task DeleteExpiredEventsAsync(CancellationToken ct)

@@ -245,6 +245,15 @@ public sealed class NostrConnectionHandler(
 
         metrics.RecordEventIngested();
 
+        // NIP-09: a successfully-stored kind-5 event's side effect is deleting whatever
+        // it references, ownership-checked (e tags) or self-evidently owned (a tags,
+        // already filtered at parse time) inside the storage layer itself. Only on
+        // Stored, not Superseded/Duplicate: a duplicate deletion request shouldn't
+        // re-run its deletions (they already happened the first time), and kind 5 isn't
+        // replaceable/addressable so Superseded can't occur for it anyway.
+        if (evt.Kind == 5 && result.Outcome == PersistOutcome.Stored)
+            await ProcessDeletionRequestAsync(evt, ct);
+
         // Broadcast genuinely new content: a freshly stored event (regular, or the new
         // latest for a replaceable/addressable key) and ephemeral events, whose only
         // delivery path is this live broadcast, they're never queryable historically.
@@ -254,6 +263,36 @@ public sealed class NostrConnectionHandler(
 
         var (accepted, message) = MapPersistResult(result);
         await outbound.WriteAsync(new OkRelayMessage(evt.Id, accepted, message), ct);
+    }
+
+    private async Task ProcessDeletionRequestAsync(NostrEvent deletionEvent, CancellationToken ct)
+    {
+        DeletionRequest request = DeletionRequest.Parse(deletionEvent);
+
+        if (request.EventIds.Count > 0)
+        {
+            try
+            {
+                await eventStore.DeleteEventsAuthoredByAsync(request.EventIds, deletionEvent.Pubkey, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogError(ex, "failed to process e-tag deletions for {EventId}", deletionEvent.Id);
+            }
+        }
+
+        foreach (AddressableCoordinate coordinate in request.AddressableCoordinates)
+        {
+            try
+            {
+                await eventStore.DeleteAddressableEventAsync(
+                    coordinate.Pubkey, coordinate.Kind, coordinate.DTag, deletionEvent.CreatedAt, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogError(ex, "failed to process a-tag deletion for {EventId}", deletionEvent.Id);
+            }
+        }
     }
 
     /// <summary>Extracts the standardized OK-message prefix (Section 2.2, e.g. "invalid",
