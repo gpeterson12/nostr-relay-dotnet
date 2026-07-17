@@ -2,8 +2,8 @@
 
 A production-grade [Nostr](https://github.com/nostr-protocol/nostr) relay written in C# / .NET 10.
 
-[![Build Status](https://img.shields.io/badge/build-not_yet_configured-lightgrey)](#known-gaps--roadmap)
-[![License](https://img.shields.io/badge/license-TBD-lightgrey)](#license)
+[![CI](https://github.com/gpeterson12/nostr-relay-dotnet/actions/workflows/ci.yml/badge.svg)](https://github.com/gpeterson12/nostr-relay-dotnet/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 > **Status: active development, first README draft.** Milestones 1–9 are complete; Milestone 11
 > (benchmarking) is in progress. See [Known Gaps & Roadmap](#known-gaps--roadmap) for exactly
@@ -11,11 +11,17 @@ A production-grade [Nostr](https://github.com/nostr-protocol/nostr) relay writte
 
 ## Why this exists
 
-At the time this project began, not a ton of C#/.NET Nostr relay implementation existed,
-despite active implementations in Rust, Go, TypeScript, Clojure, and C++. This project fills
-that gap while demonstrating senior-level .NET backend engineering: clean architecture,
-concurrency correctness, measurable performance, dual-datastore support, comprehensive testing,
-and observability - not just CRUD-over-HTTP.
+I built this to get hands-on experience with decentralized protocols and open-source
+development, and to learn a little bit about Nostr. Nostr's simplicity (no blockchain, no
+token, just signed events and dumb-pipe relays) made it an approachable entry point into
+decentralized systems without years of distributed-systems background as a prerequisite.
+
+It also happened to fill a real gap: at the time this project began, not a ton of C#/.NET
+Nostr relay implementation existed, despite active implementations in Rust, Go, TypeScript,
+Clojure, and C++. Beyond the learning goal, this project doubles as a demonstration of
+senior-level .NET backend engineering: clean architecture, concurrency correctness, measurable
+performance, dual-datastore support, comprehensive testing, and observability - not just
+CRUD-over-HTTP.
 
 It's built to actually work: it accepts connections from real Nostr clients (Damus, Amethyst,
 Primal, Coracle, etc.) and interoperates with the live network, not just its own test suite.
@@ -352,8 +358,7 @@ Honest accounting of what's deferred, what's missing, and why - not a changelog.
 - **Multi-filter `REQ` results are concatenated per-filter, not globally merge-sorted** across
   filters - each filter's own results are most-recent-first, but the overall stream isn't. Noted
   as an acceptable simplification since Milestone 2, revisit if it ever matters in practice.
-- **No CI pipeline configured yet** - the build status badge above is a placeholder.
 
 ## License
 
-TBD.
+MIT - see [LICENSE](LICENSE).

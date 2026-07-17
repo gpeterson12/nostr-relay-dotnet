@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    # PostgresEventStoreContractTests needs a reachable Postgres server, this service
+    # container fills that role in CI the same way Postgres.app does locally. The
+    # postgres superuser role has implicit CREATEDB, so PostgresDatabaseProvisioner's
+    # auto-create path works here without any manual `createdb` step.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Build
+        run: dotnet build --no-restore --configuration Release
+
+      - name: Test
+        env:
+          # Matches this service container's credentials, not Postgres.app's local
+          # trust-auth defaults (which PostgresEventStoreContractTests falls back to
+          # when this variable is unset).
+          NOSTR_RELAY_TEST_POSTGRES_CONNECTION_STRING: "Host=localhost;Port=5432;Username=postgres;Password=postgres;Database=nostr_relay_test"
+        run: dotnet test --no-build --configuration Release --logger "trx" --results-directory TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults
