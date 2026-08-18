@@ -5,6 +5,7 @@
     <File Path="global.json" />
     <File Path="README.md" />
     <File Path="Directory.Build.props" />
+    <File Path=".github\workflows\ci.yml" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/NostrRelay.Cli/NostrRelay.Cli.csproj" />
