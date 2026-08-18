@@ -1,7 +1,6 @@
-using System.Data.Common;
 using System.Runtime.CompilerServices;
-using System.Text.Json;
-using Dapper;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Npgsql;
 using NostrRelay.Core;
 using NostrRelay.Storage.Abstractions;
@@ -9,35 +8,38 @@ using NostrRelay.Storage.Abstractions;
 namespace NostrRelay.Storage.Postgres;
 
 /// <summary>
-/// Postgres implementation of <see cref="IEventStore"/> (Section 5.2), the second provider
-/// against the same contract test suite SqliteEventStore already passes. Opens a fresh
-/// connection per operation, same as SqliteEventStore; for Npgsql specifically this is the
-/// recommended pattern rather than an accommodation, Npgsql pools physical connections
-/// behind the scenes per connection string, so "new NpgsqlConnection then dispose" is
-/// cheap and is exactly how the driver's built-in pooling (Section 5.2) is meant to be used.
+/// Postgres implementation of <see cref="IEventStore"/> (Section 5.2), now backed by EF
+/// Core instead of Dapper. One short-lived <see cref="NostrRelayDbContext"/> per operation,
+/// created from a <see cref="PooledDbContextFactory{TContext}"/>: the direct EF analogue of
+/// the old "new connection per operation" pattern, since Npgsql's built-in connection
+/// pooling (which that pattern relied on) sits underneath EF's context pooling too.
 ///
-/// The one structurally different piece from SqliteEventStore: replaceable/addressable
-/// writes use a Postgres advisory lock (<see cref="SaveKeyedAsync"/>) rather than SQLite's
-/// whole-database <c>BEGIN IMMEDIATE</c>. This is a case where the two providers reach
-/// correctness by genuinely different means rather than the same code translated verbatim,
-/// which is exactly the kind of divergence Section 5.2 expects and the contract tests exist
-/// to prove doesn't leak into different observable behavior.
+/// The one structurally different piece from a hypothetical SqliteEventStore migration:
+/// replaceable/addressable writes still use a Postgres advisory lock
+/// (<see cref="SaveKeyedAsync"/>), now taken via <c>ExecuteSqlInterpolatedAsync</c> against
+/// an EF-managed transaction rather than a raw Dapper command. Same reasoning as before:
+/// only writers targeting the same key ever contend.
 /// </summary>
-public sealed class PostgresEventStore(string connectionString) : IEventStore
+public sealed class PostgresEventStore : IEventStore
 {
-    public async Task InitializeAsync(CancellationToken ct = default)
-    {
-        await PostgresDatabaseProvisioner.EnsureDatabaseExistsAsync(connectionString, ct);
+    private readonly string _connectionString;
+    private readonly PooledDbContextFactory<NostrRelayDbContext> _contextFactory;
 
-        await using NpgsqlConnection connection = await OpenAsync(ct);
-        await PostgresSchema.EnsureCreatedAsync(connection, ct);
+    public PostgresEventStore(string connectionString)
+    {
+        _connectionString = connectionString;
+
+        var optionsBuilder = new DbContextOptionsBuilder<NostrRelayDbContext>();
+        optionsBuilder.UseNpgsql(connectionString);
+        _contextFactory = new PooledDbContextFactory<NostrRelayDbContext>(optionsBuilder.Options);
     }
 
-    private async Task<NpgsqlConnection> OpenAsync(CancellationToken ct)
+    public async Task InitializeAsync(CancellationToken ct = default)
     {
-        var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(ct);
-        return connection;
+        await PostgresDatabaseProvisioner.EnsureDatabaseExistsAsync(_connectionString, ct);
+
+        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
+        await context.Database.MigrateAsync(ct);
     }
 
     public async Task<PersistResult> SaveEventAsync(NostrEvent evt, CancellationToken ct)
@@ -47,96 +49,83 @@ public sealed class PostgresEventStore(string connectionString) : IEventStore
         if (category == NostrEventKindCategory.Ephemeral)
             return PersistResult.Ephemeral();
 
-        await using NpgsqlConnection connection = await OpenAsync(ct);
+        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
 
         return category switch
         {
-            NostrEventKindCategory.Regular => await SaveRegularAsync(connection, evt, ct),
-            NostrEventKindCategory.Replaceable => await SaveReplaceableAsync(connection, evt, ct),
-            NostrEventKindCategory.Addressable => await SaveAddressableAsync(connection, evt, ct),
+            NostrEventKindCategory.Regular => await SaveRegularAsync(context, evt, ct),
+            NostrEventKindCategory.Replaceable => await SaveReplaceableAsync(context, evt, ct),
+            NostrEventKindCategory.Addressable => await SaveAddressableAsync(context, evt, ct),
             _ => throw new InvalidOperationException($"unhandled kind category: {category}"),
         };
     }
 
-    private static async Task<PersistResult> SaveRegularAsync(NpgsqlConnection connection, NostrEvent evt, CancellationToken ct)
+    private static async Task<PersistResult> SaveRegularAsync(NostrRelayDbContext context, NostrEvent evt, CancellationToken ct)
     {
-        var rowsAffected = await connection.ExecuteAsync(new CommandDefinition(
-            """
-            INSERT INTO events (id, pubkey, created_at, kind, tags, content, sig, expires_at, d_tag)
-            VALUES (@Id, @Pubkey, @CreatedAt, @Kind, @Tags::jsonb, @Content, @Sig, @ExpiresAt, @DTag)
-            ON CONFLICT (id) DO NOTHING
-            """,
-            BuildInsertParameters(evt),
-            cancellationToken: ct));
+        // id is the primary key, so a regular event is naturally deduplicated by insert.
+        // EF/SaveChanges has no native "ON CONFLICT DO NOTHING"; a unique-violation on
+        // save is caught and treated as the duplicate signal instead, same outcome as the
+        // old ON CONFLICT (id) DO NOTHING, one round trip either way.
+        context.Events.Add(evt.ToEntity());
+        context.EventTags.AddRange(evt.ToTagEntities());
 
-        if (rowsAffected == 0)
+        try
+        {
+            await context.SaveChangesAsync(ct);
+        }
+        catch (DbUpdateException ex) when (IsUniqueViolation(ex))
+        {
             return PersistResult.Duplicate();
+        }
 
-        await InsertTagsAsync(connection, evt, ct);
         return PersistResult.Stored();
     }
 
-    private static Task<PersistResult> SaveReplaceableAsync(NpgsqlConnection connection, NostrEvent evt, CancellationToken ct) =>
+    private static Task<PersistResult> SaveReplaceableAsync(NostrRelayDbContext context, NostrEvent evt, CancellationToken ct) =>
         SaveKeyedAsync(
-            connection, evt, ct,
+            context, evt, ct,
             lockKey: $"replaceable:{evt.Pubkey}:{evt.Kind}",
-            lookupSql: "SELECT id AS Id, created_at AS CreatedAt FROM events WHERE pubkey = @Pubkey AND kind = @Kind",
-            lookupParams: new { evt.Pubkey, evt.Kind },
-            deleteSql: "DELETE FROM events WHERE pubkey = @Pubkey AND kind = @Kind",
-            deleteParams: new { evt.Pubkey, evt.Kind });
+            lookup: q => q.Where(e => e.Pubkey == evt.Pubkey && e.Kind == evt.Kind),
+            delete: q => q.Where(e => e.Pubkey == evt.Pubkey && e.Kind == evt.Kind));
 
-    private static Task<PersistResult> SaveAddressableAsync(NpgsqlConnection connection, NostrEvent evt, CancellationToken ct)
+    private static Task<PersistResult> SaveAddressableAsync(NostrRelayDbContext context, NostrEvent evt, CancellationToken ct)
     {
         var dTag = evt.GetFirstTagValue("d") ?? "";
 
         return SaveKeyedAsync(
-            connection, evt, ct,
+            context, evt, ct,
             lockKey: $"addressable:{evt.Pubkey}:{evt.Kind}:{dTag}",
-            lookupSql: "SELECT id AS Id, created_at AS CreatedAt FROM events WHERE pubkey = @Pubkey AND kind = @Kind AND d_tag = @DTag",
-            lookupParams: new { evt.Pubkey, evt.Kind, DTag = dTag },
-            deleteSql: "DELETE FROM events WHERE pubkey = @Pubkey AND kind = @Kind AND d_tag = @DTag",
-            deleteParams: new { evt.Pubkey, evt.Kind, DTag = dTag });
+            lookup: q => q.Where(e => e.Pubkey == evt.Pubkey && e.Kind == evt.Kind && e.DTag == dTag),
+            delete: q => q.Where(e => e.Pubkey == evt.Pubkey && e.Kind == evt.Kind && e.DTag == dTag));
     }
 
     /// <summary>
-    /// Shared upsert-by-key logic for replaceable and addressable events (Section 3.3).
-    /// Deliberately uses lookup-then-delete-then-insert (the same shape as
-    /// SqliteEventStore) rather than Postgres's native <c>ON CONFLICT ... DO UPDATE</c>:
-    /// this table's primary key <i>is</i> the Nostr event id, and a replaceable event's id
-    /// changes with every version, so an upsert would need to change the row's primary key
-    /// in place. Without <c>ON UPDATE CASCADE</c> on event_tags' foreign key, that would
-    /// orphan the previous version's tag rows; adding <c>ON UPDATE CASCADE</c> would fix
-    /// referential integrity but still leave the tag rows holding the *old* event's tag
-    /// content under the *new* id, since a cascade only renames the foreign key, it doesn't
-    /// replace the tag data. Delete-then-insert sidesteps both problems and keeps this
-    /// provider's observable behavior identical to SQLite's, which is what the contract
-    /// tests are actually verifying.
-    ///
-    /// The concurrency guard is genuinely different, though: a Postgres advisory lock
-    /// scoped to this transaction and keyed on the exact replaceable/addressable identity,
-    /// serializing concurrent writers targeting that one key, including the "no row exists
-    /// yet" case that a `SELECT ... FOR UPDATE` can't protect (there's no row to lock).
-    /// This is more surgical than SQLite's whole-database `BEGIN IMMEDIATE` write lock,
-    /// only writers to the *same* key ever contend with each other.
+    /// Shared upsert-by-key logic for replaceable and addressable events (Section 3.3), the
+    /// EF counterpart of the old Dapper <c>SaveKeyedAsync</c>. Still lookup-then-delete-
+    /// then-insert rather than a native upsert, same rationale as before: this table's
+    /// primary key is the Nostr event id, which changes with every version of a
+    /// replaceable/addressable event, so there is no single row to "update in place".
+    /// <see cref="ExecuteDeleteAsync{TSource}"/> runs against the same ambient transaction
+    /// as the lookup and the eventual insert, so the whole read-check-delete-insert
+    /// sequence is atomic per key, exactly as the raw-SQL version was.
     /// </summary>
     private static async Task<PersistResult> SaveKeyedAsync(
-        NpgsqlConnection connection,
+        NostrRelayDbContext context,
         NostrEvent evt,
         CancellationToken ct,
         string lockKey,
-        string lookupSql,
-        object lookupParams,
-        string deleteSql,
-        object deleteParams)
+        Func<IQueryable<NostrEventEntity>, IQueryable<NostrEventEntity>> lookup,
+        Func<IQueryable<NostrEventEntity>, IQueryable<NostrEventEntity>> delete)
     {
-        await using NpgsqlTransaction transaction = await connection.BeginTransactionAsync(ct);
+        await using Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction transaction =
+            await context.Database.BeginTransactionAsync(ct);
 
-        await connection.ExecuteAsync(new CommandDefinition(
-            "SELECT pg_advisory_xact_lock(hashtext(@LockKey)::bigint)",
-            new { LockKey = lockKey }, transaction, cancellationToken: ct));
+        await context.Database.ExecuteSqlInterpolatedAsync(
+            $"SELECT pg_advisory_xact_lock(hashtext({lockKey})::bigint)", ct);
 
-        var existing = await connection.QuerySingleOrDefaultAsync<ExistingKeyRow>(
-            new CommandDefinition(lookupSql, lookupParams, transaction, cancellationToken: ct));
+        var existing = await lookup(context.Events)
+            .Select(e => new { e.Id, e.CreatedAt })
+            .SingleOrDefaultAsync(ct);
 
         if (existing is not null)
         {
@@ -150,65 +139,19 @@ public sealed class PostgresEventStore(string connectionString) : IEventStore
                 return PersistResult.Superseded();
             }
 
-            await connection.ExecuteAsync(new CommandDefinition(deleteSql, deleteParams, transaction, cancellationToken: ct));
+            await delete(context.Events).ExecuteDeleteAsync(ct);
         }
 
-        await connection.ExecuteAsync(new CommandDefinition(
-            """
-            INSERT INTO events (id, pubkey, created_at, kind, tags, content, sig, expires_at, d_tag)
-            VALUES (@Id, @Pubkey, @CreatedAt, @Kind, @Tags::jsonb, @Content, @Sig, @ExpiresAt, @DTag)
-            """,
-            BuildInsertParameters(evt),
-            transaction,
-            cancellationToken: ct));
-
-        await InsertTagsAsync(connection, evt, ct, transaction);
+        context.Events.Add(evt.ToEntity());
+        context.EventTags.AddRange(evt.ToTagEntities());
+        await context.SaveChangesAsync(ct);
 
         await transaction.CommitAsync(ct);
         return PersistResult.Stored();
     }
 
-    private static async Task InsertTagsAsync(
-        NpgsqlConnection connection, NostrEvent evt, CancellationToken ct, NpgsqlTransaction? transaction = null)
-    {
-        var rows = evt.Tags
-            .Where(tag => tag.Count >= 2 && tag[0].Length == 1 && char.IsAsciiLetter(tag[0][0]))
-            .Select(tag => new { EventId = evt.Id, TagName = tag[0], TagValue = tag[1] })
-            .ToList();
-
-        if (rows.Count == 0)
-            return;
-
-        await connection.ExecuteAsync(new CommandDefinition(
-            "INSERT INTO event_tags (event_id, tag_name, tag_value) VALUES (@EventId, @TagName, @TagValue)",
-            rows,
-            transaction,
-            cancellationToken: ct));
-    }
-
-    private static object BuildInsertParameters(NostrEvent evt)
-    {
-        NostrEventKindCategory category = evt.Classify();
-
-        return new
-        {
-            evt.Id,
-            evt.Pubkey,
-            evt.CreatedAt,
-            evt.Kind,
-            Tags = JsonSerializer.Serialize(evt.Tags),
-            evt.Content,
-            evt.Sig,
-            ExpiresAt = ExtractExpiresAt(evt),
-            DTag = category == NostrEventKindCategory.Addressable ? evt.GetFirstTagValue("d") ?? "" : null,
-        };
-    }
-
-    private static long? ExtractExpiresAt(NostrEvent evt)
-    {
-        var raw = evt.GetFirstTagValue("expiration");
-        return raw is not null && long.TryParse(raw, out var value) ? value : null;
-    }
+    private static bool IsUniqueViolation(DbUpdateException ex) =>
+        ex.InnerException is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation };
 
     public async IAsyncEnumerable<NostrEvent> QueryAsync(
         IReadOnlyList<NostrFilter> filters, [EnumeratorCancellation] CancellationToken ct)
@@ -216,51 +159,31 @@ public sealed class PostgresEventStore(string connectionString) : IEventStore
         if (filters.Count == 0)
             yield break;
 
-        await using NpgsqlConnection connection = await OpenAsync(ct);
+        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
         var seenIds = new HashSet<string>();
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-        for (var i = 0; i < filters.Count; i++)
+        foreach (NostrFilter filter in filters)
         {
-            var prefix = $"f{i}";
-            (var whereClause, DynamicParameters parameters) = PostgresFilterSqlBuilder.Build(filters[i], prefix);
+            var query = PostgresEventQueryBuilder.Build(context, filter, now)
+                .OrderByDescending(e => e.CreatedAt)
+                .ThenBy(e => e.Id)
+                .Take(filter.Limit ?? 500);
 
-            var limitParam = $"{prefix}_limit";
-            var nowParam = $"{prefix}_now";
-            parameters.Add(limitParam, filters[i].Limit ?? 500);
-            parameters.Add(nowParam, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-
-            // NIP-40: "Relays SHOULD NOT send expired events to clients, even if they are
-            // stored." Enforced on every query unconditionally, not relied on as a side
-            // effect of the periodic sweep (DeleteExpiredEventsAsync) having already run.
-            var sql = $"""
-                SELECT id AS Id, pubkey AS Pubkey, created_at AS CreatedAt, kind AS Kind, tags::text AS Tags, content AS Content, sig AS Sig
-                FROM events e
-                WHERE ({whereClause}) AND (e.expires_at IS NULL OR e.expires_at > @{nowParam})
-                ORDER BY created_at DESC, id ASC
-                LIMIT @{limitParam}
-                """;
-
-            var command = new CommandDefinition(sql, parameters, cancellationToken: ct);
-            await using DbDataReader reader = await connection.ExecuteReaderAsync(command);
-            var parse = reader.GetRowParser<EventRow>();
-
-            while (await reader.ReadAsync(ct))
+            await foreach (NostrEventEntity entity in query.AsAsyncEnumerable().WithCancellation(ct))
             {
-                EventRow row = parse(reader);
-                if (seenIds.Add(row.Id.TrimEnd()))
-                    yield return row.ToNostrEvent();
+                if (seenIds.Add(entity.Id))
+                    yield return entity.ToDomain();
             }
         }
     }
 
     public async Task<long> CountAsync(NostrFilter filter, CancellationToken ct)
     {
-        await using NpgsqlConnection connection = await OpenAsync(ct);
-        (var whereClause, DynamicParameters parameters) = PostgresFilterSqlBuilder.Build(filter, "f");
-        parameters.Add("f_now", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-        var sql = $"SELECT COUNT(*) FROM events e WHERE ({whereClause}) AND (e.expires_at IS NULL OR e.expires_at > @f_now)";
-        return await connection.ExecuteScalarAsync<long>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        return await PostgresEventQueryBuilder.Build(context, filter, now).CountAsync(ct);
     }
 
     public async Task DeleteEventsAsync(IEnumerable<string> eventIds, CancellationToken ct)
@@ -269,9 +192,8 @@ public sealed class PostgresEventStore(string connectionString) : IEventStore
         if (ids.Count == 0)
             return;
 
-        await using NpgsqlConnection connection = await OpenAsync(ct);
-        await connection.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM events WHERE id = ANY(@Ids)", new { Ids = ids }, cancellationToken: ct));
+        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
+        await context.Events.Where(e => ids.Contains(e.Id)).ExecuteDeleteAsync(ct);
     }
 
     public async Task DeleteEventsAuthoredByAsync(IEnumerable<string> eventIds, string authorPubkey, CancellationToken ct)
@@ -280,40 +202,31 @@ public sealed class PostgresEventStore(string connectionString) : IEventStore
         if (ids.Count == 0)
             return;
 
-        await using NpgsqlConnection connection = await OpenAsync(ct);
+        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
 
-        // "AND kind != 5" enforces NIP-09's "deletion request against a deletion request
-        // has no effect": a kind-5 row is never deletable through this path.
-        await connection.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM events WHERE id = ANY(@Ids) AND pubkey = @AuthorPubkey AND kind != 5",
-            new { Ids = ids, AuthorPubkey = authorPubkey },
-            cancellationToken: ct));
+        // "kind != 5" enforces NIP-09's "deletion request against a deletion request has
+        // no effect": a kind-5 row is never deletable through this path.
+        await context.Events
+            .Where(e => ids.Contains(e.Id) && e.Pubkey == authorPubkey && e.Kind != 5)
+            .ExecuteDeleteAsync(ct);
     }
 
     public async Task DeleteAddressableEventAsync(string pubkey, int kind, string dTag, long upToCreatedAt, CancellationToken ct)
     {
-        await using NpgsqlConnection connection = await OpenAsync(ct);
+        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
 
-        await connection.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM events WHERE pubkey = @Pubkey AND kind = @Kind AND d_tag = @DTag AND created_at <= @UpToCreatedAt",
-            new { Pubkey = pubkey, Kind = kind, DTag = dTag, UpToCreatedAt = upToCreatedAt },
-            cancellationToken: ct));
+        await context.Events
+            .Where(e => e.Pubkey == pubkey && e.Kind == kind && e.DTag == dTag && e.CreatedAt <= upToCreatedAt)
+            .ExecuteDeleteAsync(ct);
     }
 
     public async Task DeleteExpiredEventsAsync(CancellationToken ct)
     {
-        await using NpgsqlConnection connection = await OpenAsync(ct);
+        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
         var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-        await connection.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM events WHERE expires_at IS NOT NULL AND expires_at <= @Now",
-            new { Now = nowUnix },
-            cancellationToken: ct));
-    }
-
-    private sealed class ExistingKeyRow
-    {
-        public string Id { get; set; } = "";
-        public long CreatedAt { get; set; }
+        await context.Events
+            .Where(e => e.ExpiresAt != null && e.ExpiresAt <= nowUnix)
+            .ExecuteDeleteAsync(ct);
     }
 }

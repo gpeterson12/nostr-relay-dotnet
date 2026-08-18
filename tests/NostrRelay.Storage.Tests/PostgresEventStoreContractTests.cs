@@ -1,4 +1,3 @@
-using Dapper;
 using Npgsql;
 using NostrRelay.Storage.Abstractions;
 using NostrRelay.Storage.Postgres;
@@ -23,6 +22,11 @@ namespace NostrRelay.Storage.Tests;
 /// database per test, without a real Testcontainers/Docker dependency for local runs.
 /// Section 7 calls out Testcontainers as the CI-time approach for Postgres, a reasonable
 /// upgrade once this project has real CI, this connects directly to a local server instead.
+///
+/// Uses plain <see cref="NpgsqlCommand"/> for the schema create/drop rather than Dapper:
+/// same reasoning as <see cref="PostgresDatabaseProvisioner"/>, this is database-level DDL
+/// outside anything EF models, and Dapper is no longer a dependency of the Postgres
+/// project this test project references.
 /// </summary>
 public sealed class PostgresEventStoreContractTests : EventStoreContractTests
 {
@@ -47,7 +51,9 @@ public sealed class PostgresEventStoreContractTests : EventStoreContractTests
         await using (var setupConnection = new NpgsqlConnection(BaseConnectionString))
         {
             await setupConnection.OpenAsync();
-            await setupConnection.ExecuteAsync($"CREATE SCHEMA IF NOT EXISTS \"{_schemaName}\"");
+            await using var createSchemaCommand =
+                new NpgsqlCommand($"CREATE SCHEMA IF NOT EXISTS \"{_schemaName}\"", setupConnection);
+            await createSchemaCommand.ExecuteNonQueryAsync();
         }
 
         var isolatedConnectionString = $"{BaseConnectionString};SearchPath={_schemaName}";
@@ -60,6 +66,8 @@ public sealed class PostgresEventStoreContractTests : EventStoreContractTests
     {
         await using var connection = new NpgsqlConnection(BaseConnectionString);
         await connection.OpenAsync();
-        await connection.ExecuteAsync($"DROP SCHEMA IF EXISTS \"{_schemaName}\" CASCADE");
+        await using var dropSchemaCommand =
+            new NpgsqlCommand($"DROP SCHEMA IF EXISTS \"{_schemaName}\" CASCADE", connection);
+        await dropSchemaCommand.ExecuteNonQueryAsync();
     }
 }

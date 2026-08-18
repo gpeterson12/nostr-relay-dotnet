@@ -11,20 +11,13 @@ A production-grade [Nostr](https://github.com/nostr-protocol/nostr) relay writte
 
 ## Why this exists
 
-I built this to get hands-on experience with decentralized protocols and open-source
-development, and to learn a little bit about Nostr. Nostr's simplicity (no blockchain, no
-token, just signed events and dumb-pipe relays) made it an approachable entry point into
-decentralized systems without years of distributed-systems background as a prerequisite.
+I built this to get hands-on experience with decentralized protocols and open-source development, and to learn a little bit about Nostr. Nostr's simplicity (no blockchain, no token, just signed events and dumb-pipe relays) made it an approachable entry point into decentralized systems without years of distributed-systems background as a prerequisite.
 
-It also happened to fill a real gap: at the time this project began, not a ton of C#/.NET
-Nostr relay implementation existed, despite active implementations in Rust, Go, TypeScript,
-Clojure, and C++. Beyond the learning goal, this project doubles as a demonstration of
-senior-level .NET backend engineering: clean architecture, concurrency correctness, measurable
-performance, dual-datastore support, comprehensive testing, and observability - not just
-CRUD-over-HTTP.
+It also happened to fill a real gap. At the time this project began, not a ton of C#/.NET Nostr relay implementations existed, despite active implementations in Rust, Go, TypeScript, Clojure, and C++.
 
-It's built to actually work: it accepts connections from real Nostr clients (Damus, Amethyst,
-Primal, Coracle, etc.) and interoperates with the live network, not just its own test suite.
+This is also a portfolio piece. I wanted something that would let me show senior-level .NET and Entity Framework work, not just talk about it. Clean architecture, concurrency correctness, measurable performance, dual-datastore support with EF Core migrations behind both, comprehensive testing, and observability. Not just CRUD-over-HTTP.
+
+It's built to actually work. It accepts connections from real Nostr clients (Damus, Amethyst, Primal, Coracle, etc.) and interoperates with the live network, not just its own test suite.
 
 ## Supported NIPs
 
@@ -106,6 +99,15 @@ providers). They reach that identical behavior by genuinely different means wher
 engines differ: SQLite uses a whole-database `BEGIN IMMEDIATE` write lock for replaceable/
 addressable event upserts, Postgres uses a per-key `pg_advisory_xact_lock` instead, more
 surgical since only writers to the *same* key ever contend.
+
+Both providers are built on EF Core (`Microsoft.EntityFrameworkCore.Sqlite` /
+`Npgsql.EntityFrameworkCore.PostgreSQL`): filters translate to LINQ against a small entity
+model rather than hand-written SQL, and schema is version-controlled as EF Core Migrations
+(`dotnet ef migrations add`), applied automatically via `Database.MigrateAsync()` on startup,
+rather than the idempotent embedded SQL scripts used earlier in the project. The 30-test
+contract suite carried that migration itself: it was written against the original Dapper-based
+implementations and ran unmodified against the EF Core rewrite, catching a real regression (a
+Postgres `char(n)` padding edge case) before it reached production code.
 
 ```
 src/
