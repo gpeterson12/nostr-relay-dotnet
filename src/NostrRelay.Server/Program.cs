@@ -25,6 +25,10 @@ WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 // else.
 builder.Logging.AddJsonConsole();
 
+// Section 5.6's "Storage" section, bound to a real options type alongside Limits/Policy/
+// ExpirationSweep below.
+builder.Services.Configure<StorageOptions>(builder.Configuration.GetSection("Storage"));
+
 var provider = builder.Configuration.GetValue<string>("Storage:Provider") ?? "Sqlite";
 var connectionString = builder.Configuration.GetValue<string>("Storage:ConnectionString");
 
@@ -63,8 +67,9 @@ switch (provider)
         // AddNpgsqlDataSource registers a shared NpgsqlDataSource as a singleton that the
         // container owns and disposes. AddPooledDbContextFactory registers
         // IDbContextFactory<PostgresNostrRelayDbContext>, the DI-native equivalent of
-        // manually constructing a PooledDbContextFactory<T>. PostgresEventStore takes both
-        // as constructor parameters, so it needs no special construction step of its own.
+        // manually constructing a PooledDbContextFactory<T>. PostgresEventStore takes both,
+        // plus the IOptions<StorageOptions> configured above, as constructor parameters, so
+        // it needs no special construction step of its own, ordinary AddSingleton below.
         builder.Services.AddNpgsqlDataSource(postgresConnectionString);
         builder.Services.AddPooledDbContextFactory<PostgresNostrRelayDbContext>((sp, options) =>
         {

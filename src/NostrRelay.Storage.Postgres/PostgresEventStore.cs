@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using Microsoft.Extensions.Options;
 using Npgsql;
 using NostrRelay.Core;
 using NostrRelay.Storage.Abstractions;
@@ -9,20 +10,17 @@ namespace NostrRelay.Storage.Postgres;
 
 /// <summary>
 /// Postgres implementation of <see cref="IEventStore"/> (Section 5.2), backed by EF Core.
-/// Both the <see cref="NpgsqlDataSource"/> and the
-/// <see cref="IDbContextFactory{TContext}"/> are constructor-injected rather than built
-/// inside this class: the app registers them via <c>AddNpgsqlDataSource</c> and
-/// <c>AddPooledDbContextFactory&lt;PostgresNostrRelayDbContext&gt;</c> (see
-/// <c>Program.cs</c>), and this class stays an ordinary DI-resolvable singleton with no
-/// special construction order relative to the rest of the container. Because the data
-/// source is owned and disposed by the container (it's registered directly as a service),
-/// this class does not implement <see cref="IDisposable"/> itself; disposing it here as
-/// well would double-dispose a resource the container already manages.
-///
-/// The connection string used for database-existence provisioning
-/// (<see cref="InitializeAsync"/>) is read from the injected data source's own
-/// <see cref="NpgsqlDataSource.ConnectionString"/> rather than taking a separate string
-/// parameter, so there's a single source of truth for it.
+/// The <see cref="NpgsqlDataSource"/>, the <see cref="IDbContextFactory{TContext}"/>, and
+/// <see cref="StorageOptions"/> are all constructor-injected rather than built inside this
+/// class: the app registers the first two via <c>AddNpgsqlDataSource</c> and
+/// <c>AddPooledDbContextFactory&lt;PostgresNostrRelayDbContext&gt;</c>, and the third via
+/// <c>Configure&lt;StorageOptions&gt;</c> against the "Storage" configuration section (see
+/// <c>Program.cs</c>), so this class stays an ordinary DI-resolvable singleton
+/// (<c>AddSingleton&lt;IEventStore, PostgresEventStore&gt;()</c>) with no special
+/// construction step of its own. Because the data source is owned and disposed by the
+/// container (it's registered directly as a service), this class does not implement
+/// <see cref="IDisposable"/> itself; disposing it here as well would double-dispose a
+/// resource the container already manages.
 ///
 /// Retry-on-failure is expected to be configured where the context factory is registered
 /// (Program.cs), not here. The one structurally different piece from
@@ -34,10 +32,11 @@ namespace NostrRelay.Storage.Postgres;
 /// </summary>
 public sealed class PostgresEventStore(
     IDbContextFactory<PostgresNostrRelayDbContext> contextFactory,
-    NpgsqlDataSource dataSource)
+    IOptions<StorageOptions> storageOptions)
     : IEventStore
 {
-    private readonly string _connectionString = dataSource.ConnectionString;
+    private readonly string _connectionString = storageOptions.Value.ConnectionString
+        ?? throw new InvalidOperationException("Storage:ConnectionString is required when Storage:Provider is \"Postgres\".");
 
     public async Task InitializeAsync(CancellationToken ct = default)
     {

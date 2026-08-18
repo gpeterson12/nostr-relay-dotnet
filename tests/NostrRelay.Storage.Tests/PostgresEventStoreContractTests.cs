@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.Extensions.Options;
 using Npgsql;
 using NostrRelay.Storage.Abstractions;
 using NostrRelay.Storage.Postgres;
@@ -30,13 +31,19 @@ namespace NostrRelay.Storage.Tests;
 /// outside anything EF models, and Dapper is no longer a dependency of the Postgres
 /// project this test project references.
 ///
-/// <see cref="PostgresEventStore"/> now takes its <see cref="NpgsqlDataSource"/> and
-/// <see cref="IDbContextFactory{TContext}"/> via constructor injection rather than
-/// building them itself (see that class's doc comment), so <see cref="CreateStoreAsync"/>
-/// builds the same two pieces <c>Program.cs</c>'s DI registration would, directly, without
-/// needing a full <see cref="IServiceProvider"/> just to satisfy the constructor. Because
-/// the data source is no longer owned/disposed by <see cref="PostgresEventStore"/> itself,
-/// this test owns it instead and disposes it in <see cref="DisposeStoreAsync"/>.
+/// <see cref="PostgresEventStore"/> now takes its <see cref="NpgsqlDataSource"/>,
+/// <see cref="IDbContextFactory{TContext}"/>, and <see cref="StorageOptions"/> via
+/// constructor injection rather than building or deriving them itself (see that class's
+/// doc comment), so <see cref="CreateStoreAsync"/> builds the same pieces
+/// <c>Program.cs</c>'s DI registration would, directly, without needing a full
+/// <see cref="IServiceProvider"/> just to satisfy the constructor. There's no container
+/// here to bind <see cref="StorageOptions"/> from configuration, so
+/// <see cref="Options.Create{TOptions}"/> constructs the <see cref="IOptions{TOptions}"/>
+/// wrapper directly around an instance carrying <c>isolatedConnectionString</c>, the same
+/// value <see cref="PostgresEventStore"/> would otherwise get resolved from configuration
+/// in the real app. Because the data source is no longer owned/disposed by
+/// <see cref="PostgresEventStore"/> itself, this test owns it instead and disposes it in
+/// <see cref="DisposeStoreAsync"/>.
 /// </summary>
 public sealed class PostgresEventStoreContractTests : EventStoreContractTests
 {
@@ -75,7 +82,13 @@ public sealed class PostgresEventStoreContractTests : EventStoreContractTests
         optionsBuilder.UseNpgsql(_dataSource, npgsqlOptions => npgsqlOptions.EnableRetryOnFailure());
         var contextFactory = new PooledDbContextFactory<PostgresNostrRelayDbContext>(optionsBuilder.Options);
 
-        var store = new PostgresEventStore(contextFactory, _dataSource);
+        var storageOptions = Options.Create(new StorageOptions
+        {
+            Provider = "Postgres",
+            ConnectionString = isolatedConnectionString,
+        });
+
+        var store = new PostgresEventStore(contextFactory, storageOptions);
         await store.InitializeAsync();
         return store;
     }
