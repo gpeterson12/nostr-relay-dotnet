@@ -1,10 +1,8 @@
-using System.Net.WebSockets;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
-using NostrRelay.Core;
 using NostrRelay.Core.Crypto;
 using NostrRelay.Core.Validation;
 using NostrRelay.Server.Configuration;
@@ -132,6 +130,28 @@ builder.Services.AddHostedService<ExpirationSweepService>();
 builder.Services.AddSingleton<RelayMetrics>();
 builder.Services.AddSingleton<NostrConnectionHandler>();
 
+// NIP-11 document and its serializer options depend only on configuration fixed at
+// startup, so both are resolved through DI as singletons rather than built as
+// Program.cs locals captured by the "/" delegate's closure. This keeps the delegate's
+// dependencies visible in its parameter list and makes RelayInfoDocument available to
+// any other consumer that might need it later (an admin endpoint, for instance).
+builder.Services.AddSingleton(sp =>
+{
+    RelayLimitsOptions limits = sp.GetRequiredService<IOptions<RelayLimitsOptions>>().Value;
+    RelayPolicyOptions policy = sp.GetRequiredService<IOptions<RelayPolicyOptions>>().Value;
+    return RelayInfoDocumentFactory.Create(sp.GetRequiredService<IConfiguration>(), limits, policy);
+});
+
+builder.Services.AddSingleton(new JsonSerializerOptions
+{
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+});
+
+// Section 6/4.4 endpoints (root NIP-11/WebSocket negotiation, /health, /metrics) live in
+// Controllers/ now rather than as minimal-API delegates, so AddControllers/MapControllers
+// replace the old app.Map/app.MapGet calls below.
+builder.Services.AddControllers();
+
 // Schema must exist before any request is handled. DatabaseInitializationHostedService
 // implements IHostedLifecycleService, so the host runs its StartingAsync to completion
 // before starting Kestrel (or any other hosted service), see that class's doc comment for
@@ -143,90 +163,10 @@ WebApplication app = builder.Build();
 
 app.UseWebSockets();
 
-RelayLimitsOptions limitsOptions = app.Services.GetRequiredService<IOptions<RelayLimitsOptions>>().Value;
-RelayPolicyOptions policyOptions = app.Services.GetRequiredService<IOptions<RelayPolicyOptions>>().Value;
-
-RelayInfoDocument relayInfoDocument = RelayInfoDocumentFactory.Create(app.Configuration, limitsOptions, policyOptions);
-var relayInfoJsonOptions = new JsonSerializerOptions
-{
-    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-};
-
-// Section 6: three surfaces share this one root path via content negotiation, per NIP-01
-// ("relays MUST only accept connections to a single endpoint") and NIP-11 (served "on the
-// same URI as the relay's websocket"). /health and /metrics are separate, ordinary routes,
-// nothing in either NIP asks for those to share the root path.
-app.Map("/", async (HttpContext context, NostrConnectionHandler handler, ConnectionRegistry connections) =>
-{
-    var acceptHeader = context.Request.Headers.Accept.ToString();
-
-    if (acceptHeader.Contains("application/nostr+json", StringComparison.OrdinalIgnoreCase))
-    {
-        // NIP-11: "Relays MUST accept CORS requests by sending Access-Control-Allow-Origin,
-        // Access-Control-Allow-Headers, and Access-Control-Allow-Methods headers."
-        context.Response.Headers.AccessControlAllowOrigin = "*";
-        context.Response.Headers.AccessControlAllowHeaders = "*";
-        context.Response.Headers.AccessControlAllowMethods = "*";
-        context.Response.ContentType = "application/nostr+json";
-        await context.Response.WriteAsync(JsonSerializer.Serialize(relayInfoDocument, relayInfoJsonOptions));
-        return;
-    }
-
-    if (context.WebSockets.IsWebSocketRequest)
-    {
-        // Section 5.4: "max concurrent connections (reject new connections past this with
-        // a clean WebSocket close + reason)". Checked before AcceptWebSocketAsync rather
-        // than accept-then-immediately-close: a plain HTTP rejection here is a cleaner
-        // signal than completing a WebSocket handshake just to tear it down a moment
-        // later, and it's simpler to reason about.
-        if (connections.Count >= limitsOptions.MaxConnections)
-        {
-            context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
-            await context.Response.WriteAsync("relay is at its configured connection limit");
-            return;
-        }
-
-        var connectionId = Guid.NewGuid().ToString("N");
-        using WebSocket socket = await context.WebSockets.AcceptWebSocketAsync();
-        await handler.HandleAsync(socket, connectionId, context.RequestAborted);
-        return;
-    }
-
-    context.Response.ContentType = "text/plain";
-    await context.Response.WriteAsync(
-        "This is a Nostr relay. Connect via WebSocket, or request with header " +
-        "'Accept: application/nostr+json' for relay information (NIP-11).");
-});
-
-// Section 4.4: liveness/readiness for container orchestration. Enumerates at most one row
-// via the existing IEventStore.QueryAsync rather than calling CountAsync: a COUNT(*) scan
-// (even an index-backed one) does unnecessary work for a probe that's only meant to prove
-// the database is reachable, and that cost grows with table size. A single-row query with
-// Limit = 1 still exercises storage end to end, so an unreachable database still fails this
-// check, without paying for a full scan on every poll.
-app.MapGet("/health", async (IEventStore store) =>
-{
-    try
-    {
-        await foreach (var _ in store.QueryAsync([new NostrFilter { Limit = 1 }], CancellationToken.None))
-            break;
-
-        return Results.Ok(new { status = "ok" });
-    }
-    catch (Exception ex)
-    {
-        return Results.Problem(detail: ex.Message, statusCode: StatusCodes.Status503ServiceUnavailable, title: "storage unreachable");
-    }
-});
-
-// Section 4.4: Prometheus-compatible metrics. Covers connection/subscription/event counts
-// for now; query latency histograms and storage size are deliberately not here yet, see
-// PrometheusTextFormatter's doc comment for why.
-app.MapGet("/metrics", (RelayMetrics metrics, ConnectionRegistry connections, SubscriptionRegistry subscriptions) =>
-{
-    var text = PrometheusTextFormatter.Format(metrics, connections, subscriptions);
-    return Results.Text(text, "text/plain; version=0.0.4");
-});
+// Root NIP-11/WebSocket negotiation, /health, and /metrics are now RelayController and
+// DiagnosticsController in Controllers/, see those files for the per-endpoint comments
+// that used to live here.
+app.MapControllers();
 
 app.Run();
 
