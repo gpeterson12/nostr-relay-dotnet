@@ -10,7 +10,7 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
 namespace NostrRelay.Storage.Postgres.Migrations
 {
-    [DbContext(typeof(NostrRelayDbContext))]
+    [DbContext(typeof(PostgresNostrRelayDbContext))]
     [Migration("20260818140322_InitialCreate")]
     partial class InitialCreate
     {

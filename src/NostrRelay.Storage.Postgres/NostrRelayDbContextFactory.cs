@@ -5,7 +5,7 @@ namespace NostrRelay.Storage.Postgres;
 
 /// <summary>
 /// Lets `dotnet ef migrations add` / `dotnet ef database update` construct a
-/// <see cref="NostrRelayDbContext"/> without a running application. Needed because
+/// <see cref="PostgresNostrRelayDbContext"/> without a running application. Needed because
 /// <see cref="PostgresEventStore"/> builds its <see cref="DbContextOptions"/> manually in
 /// its own constructor instead of registering the context via
 /// <c>AddDbContext</c>/<c>AddDbContextFactory</c> in the Server project's DI container,
@@ -17,16 +17,16 @@ namespace NostrRelay.Storage.Postgres;
 /// connects). Override via the <c>NOSTRRELAY_POSTGRES_CONNECTION</c> environment variable
 /// if you want `dotnet ef database update` to target something other than local dev.
 /// </summary>
-public sealed class NostrRelayDbContextFactory : IDesignTimeDbContextFactory<NostrRelayDbContext>
+public sealed class NostrRelayDbContextFactory : IDesignTimeDbContextFactory<PostgresNostrRelayDbContext>
 {
-    public NostrRelayDbContext CreateDbContext(string[] args)
+    public PostgresNostrRelayDbContext CreateDbContext(string[] args)
     {
         var connectionString = Environment.GetEnvironmentVariable("NOSTRRELAY_POSTGRES_CONNECTION")
             ?? "Host=localhost;Database=nostr_relay_dev;Username=postgres;Password=postgres";
 
-        var optionsBuilder = new DbContextOptionsBuilder<NostrRelayDbContext>();
+        var optionsBuilder = new DbContextOptionsBuilder<PostgresNostrRelayDbContext>();
         optionsBuilder.UseNpgsql(connectionString);
 
-        return new NostrRelayDbContext(optionsBuilder.Options);
+        return new PostgresNostrRelayDbContext(optionsBuilder.Options);
     }
 }

@@ -15,6 +15,11 @@ namespace NostrRelay.Storage.Abstractions;
 public interface IEventStore
 {
     /// <summary>
+    ///  Ensures that the database is created and all migrations have been run.
+    /// </summary>
+    Task InitializeAsync(CancellationToken ct = default);
+
+    /// <summary>
     /// Persists <paramref name="evt"/> according to its kind category (Section 3.3). Callers
     /// should assume the event has already passed <see cref="Core.Validation.EventValidationPipeline"/>;
     /// this method is not responsible for re-validating id/signature.

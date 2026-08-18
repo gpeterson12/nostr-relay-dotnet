@@ -17,7 +17,7 @@ namespace NostrRelay.Storage.Sqlite;
 /// </summary>
 internal static class SqliteEventQueryBuilder
 {
-    public static IQueryable<NostrEventEntity> Build(NostrRelayDbContext context, NostrFilter filter, long nowUnixSeconds)
+    public static IQueryable<NostrEventEntity> Build(SqliteNostrRelayDbContext context, NostrFilter filter, long nowUnixSeconds)
     {
         var query = context.Events.AsNoTracking();
 

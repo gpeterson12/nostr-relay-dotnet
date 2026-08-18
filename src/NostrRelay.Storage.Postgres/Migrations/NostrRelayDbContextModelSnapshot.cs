@@ -9,7 +9,7 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
 namespace NostrRelay.Storage.Postgres.Migrations
 {
-    [DbContext(typeof(NostrRelayDbContext))]
+    [DbContext(typeof(PostgresNostrRelayDbContext))]
     partial class NostrRelayDbContextModelSnapshot : ModelSnapshot
     {
         protected override void BuildModel(ModelBuilder modelBuilder)
@@ -98,11 +98,6 @@ namespace NostrRelay.Storage.Postgres.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("TagsJson")
-                        .HasDatabaseName("idx_events_tags_gin");
-
-                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("TagsJson"), "gin");
-
                     b.HasIndex("Pubkey", "Kind")
                         .IsUnique()
                         .HasDatabaseName("uq_events_replaceable")
@@ -120,8 +115,6 @@ namespace NostrRelay.Storage.Postgres.Migrations
                     b.HasIndex(new[] { "Kind", "CreatedAt" }, "idx_events_kind_created_at");
 
                     b.HasIndex(new[] { "Pubkey", "Kind" }, "idx_events_pubkey_kind");
-
-                    b.HasIndex(new[] { "Pubkey", "Kind", "DTag" }, "idx_events_pubkey_kind_dtag");
 
                     b.ToTable("events");
                 });

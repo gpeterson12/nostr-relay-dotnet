@@ -1,3 +1,6 @@
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using NostrRelay.Storage.Abstractions;
 using NostrRelay.Storage.Sqlite;
 
@@ -10,6 +13,13 @@ namespace NostrRelay.Storage.Tests;
 /// an in-memory SQLite connection, since Microsoft.Data.Sqlite's in-memory mode requires
 /// keeping a single connection open for the database's lifetime, which conflicts with this
 /// store's connection-per-operation design.
+///
+/// <see cref="SqliteEventStore"/> now takes its <see cref="IDbContextFactory{TContext}"/>
+/// via constructor injection rather than building it itself (see that class's doc
+/// comment), so <see cref="CreateStoreAsync"/> builds the same
+/// <c>foreign_keys</c>-enabled connection string and pooled context factory
+/// <c>Program.cs</c>'s DI registration would, directly, without needing a full
+/// <see cref="IServiceProvider"/> just to satisfy the constructor.
 /// </summary>
 public sealed class SqliteEventStoreContractTests : EventStoreContractTests
 {
@@ -18,7 +28,14 @@ public sealed class SqliteEventStoreContractTests : EventStoreContractTests
     protected override async Task<IEventStore> CreateStoreAsync()
     {
         _dbPath = Path.Combine(Path.GetTempPath(), $"nostr-relay-tests-{Guid.NewGuid():N}.db");
-        var store = new SqliteEventStore($"Data Source={_dbPath}");
+
+        var connectionStringBuilder = new SqliteConnectionStringBuilder($"Data Source={_dbPath}") { ForeignKeys = true };
+
+        var optionsBuilder = new DbContextOptionsBuilder<SqliteNostrRelayDbContext>();
+        optionsBuilder.UseSqlite(connectionStringBuilder.ConnectionString);
+        var contextFactory = new PooledDbContextFactory<SqliteNostrRelayDbContext>(optionsBuilder.Options);
+
+        var store = new SqliteEventStore(contextFactory);
         await store.InitializeAsync();
         return store;
     }

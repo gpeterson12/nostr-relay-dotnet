@@ -16,7 +16,7 @@ namespace NostrRelay.Storage.Sqlite;
 ///
 /// All indexes from the original 003_create_indexes.sql are plain (unfiltered), so unlike
 /// the Postgres side, nothing here needs an OnModelCreating override, every index is
-/// expressible as an attribute (see <see cref="NostrRelayDbContext"/>'s comment).
+/// expressible as an attribute (see <see cref="SqliteNostrRelayDbContext"/>'s comment).
 /// </summary>
 [Table("events")]
 [Index(nameof(Pubkey), nameof(Kind), Name = "idx_events_pubkey_kind")]

@@ -9,7 +9,7 @@ using NostrRelay.Storage.Sqlite;
 
 namespace NostrRelay.Storage.Sqlite.Migrations
 {
-    [DbContext(typeof(NostrRelayDbContext))]
+    [DbContext(typeof(SqliteNostrRelayDbContext))]
     [Migration("20260818142720_InitialCreate")]
     partial class InitialCreate
     {

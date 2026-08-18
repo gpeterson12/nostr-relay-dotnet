@@ -15,7 +15,7 @@ namespace NostrRelay.Storage.Sqlite;
 /// DI-agnostic <see cref="DbContext"/> with a public constructor taking
 /// <see cref="DbContextOptions{TContext}"/>.
 /// </summary>
-public sealed class NostrRelayDbContext(DbContextOptions<NostrRelayDbContext> options) : DbContext(options)
+public sealed class SqliteNostrRelayDbContext(DbContextOptions<SqliteNostrRelayDbContext> options) : DbContext(options)
 {
     public DbSet<NostrEventEntity> Events => Set<NostrEventEntity>();
     public DbSet<EventTagEntity> EventTags => Set<EventTagEntity>();

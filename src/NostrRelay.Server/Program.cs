@@ -1,6 +1,8 @@
 using System.Net.WebSockets;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using NostrRelay.Core;
 using NostrRelay.Core.Crypto;
@@ -9,6 +11,7 @@ using NostrRelay.Server.Configuration;
 using NostrRelay.Server.Expiration;
 using NostrRelay.Server.Info;
 using NostrRelay.Server.Metrics;
+using NostrRelay.Server.Startup;
 using NostrRelay.Server.Subscriptions;
 using NostrRelay.Server.WebSockets;
 using NostrRelay.Storage.Abstractions;
@@ -17,21 +20,66 @@ using NostrRelay.Storage.Sqlite;
 
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
+// Section 4.4/5.1: JSON console formatter for structured logging. Registered on the app's
+// own logging pipeline (rather than a separate, disconnected logger factory) so every
+// consumer that resolves ILoggerFactory from the container, including EF Core's
+// diagnostics for either storage provider below, writes to the same sink as everything
+// else.
+builder.Logging.AddJsonConsole();
+
 var provider = builder.Configuration.GetValue<string>("Storage:Provider") ?? "Sqlite";
 var connectionString = builder.Configuration.GetValue<string>("Storage:ConnectionString");
 
-// Schema must exist before any request is handled, so this runs eagerly here rather than
-// as a hosted service startup task. Whichever concrete store gets built, it's registered
-// against IEventStore so the rest of the app only ever depends on the storage abstraction.
-IEventStore eventStore = provider switch
+// Storage service registration branches on the configured provider, since only one
+// provider's services should actually exist in the container at a time. Both branches
+// register IEventStore as an ordinary DI singleton, constructor-injected like everything
+// else, rather than being built by hand before the container exists. Schema/database
+// initialization can't happen here, though, since nothing has been resolved from the
+// container yet, so that step is deferred to DatabaseInitializationHostedService below.
+switch (provider)
 {
-    "Sqlite" => await CreateSqliteStoreAsync(connectionString ?? "Data Source=relay.db"),
-    "Postgres" => await CreatePostgresStoreAsync(connectionString
-        ?? throw new InvalidOperationException("Storage:ConnectionString is required when Storage:Provider is \"Postgres\".")),
-    _ => throw new InvalidOperationException($"Unknown Storage:Provider \"{provider}\". Expected \"Sqlite\" or \"Postgres\"."),
-};
+    case "Sqlite":
+        var sqliteConnectionString = connectionString ?? "Data Source=relay.db";
 
-builder.Services.AddSingleton(eventStore);
+        // ForeignKeys=true is baked into the connection string here rather than inside
+        // SqliteEventStore, since the store itself no longer builds its own options; this
+        // is the direct equivalent of the old per-connection PRAGMA foreign_keys = ON,
+        // applied by Microsoft.Data.Sqlite on every connection open.
+        var sqliteConnectionStringBuilder = new SqliteConnectionStringBuilder(sqliteConnectionString)
+        {
+            ForeignKeys = true,
+        };
+
+        builder.Services.AddPooledDbContextFactory<SqliteNostrRelayDbContext>((sp, options) =>
+        {
+            options.UseSqlite(sqliteConnectionStringBuilder.ConnectionString);
+            options.UseLoggerFactory(sp.GetRequiredService<ILoggerFactory>());
+        });
+        builder.Services.AddSingleton<IEventStore, SqliteEventStore>();
+        break;
+
+    case "Postgres":
+        var postgresConnectionString = connectionString
+            ?? throw new InvalidOperationException("Storage:ConnectionString is required when Storage:Provider is \"Postgres\".");
+
+        // AddNpgsqlDataSource registers a shared NpgsqlDataSource as a singleton that the
+        // container owns and disposes. AddPooledDbContextFactory registers
+        // IDbContextFactory<PostgresNostrRelayDbContext>, the DI-native equivalent of
+        // manually constructing a PooledDbContextFactory<T>. PostgresEventStore takes both
+        // as constructor parameters, so it needs no special construction step of its own.
+        builder.Services.AddNpgsqlDataSource(postgresConnectionString);
+        builder.Services.AddPooledDbContextFactory<PostgresNostrRelayDbContext>((sp, options) =>
+        {
+            options.UseNpgsql(sp.GetRequiredService<Npgsql.NpgsqlDataSource>(), npgsqlOptions => npgsqlOptions.EnableRetryOnFailure());
+            options.UseLoggerFactory(sp.GetRequiredService<ILoggerFactory>());
+        });
+        builder.Services.AddSingleton<IEventStore, PostgresEventStore>();
+        break;
+
+    default:
+        throw new InvalidOperationException($"Unknown Storage:Provider \"{provider}\". Expected \"Sqlite\" or \"Postgres\".");
+}
+
 builder.Services.AddSingleton<ISignatureVerifier, Secp256k1SignatureVerifier>();
 
 // Section 5.6: "Limits", "Policy", and "ExpirationSweep" configuration sections, bound to
@@ -83,6 +131,13 @@ builder.Services.AddHostedService<ExpirationSweepService>();
 
 builder.Services.AddSingleton<RelayMetrics>();
 builder.Services.AddSingleton<NostrConnectionHandler>();
+
+// Schema must exist before any request is handled. DatabaseInitializationHostedService
+// implements IHostedLifecycleService, so the host runs its StartingAsync to completion
+// before starting Kestrel (or any other hosted service), see that class's doc comment for
+// why that guarantee doesn't hold for an ordinary IHostedService. It resolves IEventStore
+// generically, so this works identically regardless of which provider branch above ran.
+builder.Services.AddHostedService<DatabaseInitializationHostedService>();
 
 WebApplication app = builder.Build();
 
@@ -143,14 +198,19 @@ app.Map("/", async (HttpContext context, NostrConnectionHandler handler, Connect
         "'Accept: application/nostr+json' for relay information (NIP-11).");
 });
 
-// Section 4.4: liveness/readiness for container orchestration. Actually exercises storage
-// (an empty-filter CountAsync) rather than just confirming the process is alive, so it
-// catches "the app is up but the database is unreachable" too, not only process crashes.
+// Section 4.4: liveness/readiness for container orchestration. Enumerates at most one row
+// via the existing IEventStore.QueryAsync rather than calling CountAsync: a COUNT(*) scan
+// (even an index-backed one) does unnecessary work for a probe that's only meant to prove
+// the database is reachable, and that cost grows with table size. A single-row query with
+// Limit = 1 still exercises storage end to end, so an unreachable database still fails this
+// check, without paying for a full scan on every poll.
 app.MapGet("/health", async (IEventStore store) =>
 {
     try
     {
-        await store.CountAsync(new NostrFilter(), CancellationToken.None);
+        await foreach (var _ in store.QueryAsync([new NostrFilter { Limit = 1 }], CancellationToken.None))
+            break;
+
         return Results.Ok(new { status = "ok" });
     }
     catch (Exception ex)
@@ -169,21 +229,6 @@ app.MapGet("/metrics", (RelayMetrics metrics, ConnectionRegistry connections, Su
 });
 
 app.Run();
-return;
-
-static async Task<IEventStore> CreateSqliteStoreAsync(string connectionString)
-{
-    var store = new SqliteEventStore(connectionString);
-    await store.InitializeAsync();
-    return store;
-}
-
-static async Task<IEventStore> CreatePostgresStoreAsync(string connectionString)
-{
-    var store = new PostgresEventStore(connectionString);
-    await store.InitializeAsync();
-    return store;
-}
 
 // Exposes the otherwise-implicit top-level-statements Program class so
 // WebApplicationFactory<Program> can find it in integration tests.

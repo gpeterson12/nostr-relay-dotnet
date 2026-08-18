@@ -2,7 +2,6 @@ using System.Data;
 using System.Runtime.CompilerServices;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Storage;
 using NostrRelay.Core;
 using NostrRelay.Storage.Abstractions;
@@ -10,40 +9,35 @@ using NostrRelay.Storage.Abstractions;
 namespace NostrRelay.Storage.Sqlite;
 
 /// <summary>
-/// SQLite implementation of <see cref="IEventStore"/> (Section 5.2), now backed by EF Core
-/// instead of Dapper. One short-lived <see cref="NostrRelayDbContext"/> per operation,
-/// created from a <see cref="PooledDbContextFactory{TContext}"/>, the direct EF analogue
-/// of the old "new connection per operation" pattern (Section 5.2's stated rationale for
-/// SQLite's concurrency model still applies underneath EF's pooling).
+/// SQLite implementation of <see cref="IEventStore"/> (Section 5.2), backed by EF Core. The
+/// <see cref="IDbContextFactory{TContext}"/> is constructor-injected rather than built
+/// inside this class: the app registers it via
+/// <c>AddPooledDbContextFactory&lt;SqliteNostrRelayDbContext&gt;</c> in <c>Program.cs</c>,
+/// including the <c>foreign_keys</c> connection-string setting that used to be built here,
+/// so this class stays an ordinary DI-resolvable singleton with no special construction
+/// order relative to the rest of the container, matching <c>PostgresEventStore</c>.
 ///
-/// Two pragmas the old <c>SqliteConnectionFactory</c> set per connection still need
-/// setting, just relocated:
-/// <list type="bullet">
-/// <item><c>foreign_keys</c> is set via the connection string
-/// (<see cref="SqliteConnectionStringBuilder.ForeignKeys"/>), applied by
-/// Microsoft.Data.Sqlite on every connection open, same effect as the old per-open
-/// PRAGMA, without needing a raw command every time.</item>
-/// <item><c>journal_mode = WAL</c> is set once in <see cref="InitializeAsync"/>: it
-/// persists in the database file itself, so re-setting it per operation was always just a
-/// cheap no-op, not a requirement.</item>
-/// </list>
+/// <c>journal_mode = WAL</c> is still set once in <see cref="InitializeAsync"/> rather than
+/// via the connection string: it persists in the database file itself, so re-setting it per
+/// operation (or per registration) was always just a cheap no-op, not a requirement.
+///
+/// No provider-level retry-on-failure is configured, unlike <c>PostgresEventStore</c>.
+/// That's deliberate, not an oversight: SQLite's actual transient-failure mode under
+/// concurrent writers is <c>SQLITE_BUSY</c> when a second <c>BEGIN IMMEDIATE</c> contends
+/// with an in-progress write, and <see cref="Microsoft.Data.Sqlite"/> already handles that
+/// at the connection level via its "Default Timeout" setting (30 seconds by default), which
+/// SQLite's own busy handler uses to wait and retry internally before ever surfacing
+/// <c>SQLITE_BUSY</c> as an exception. There's no SQLite-provider equivalent of Npgsql's
+/// <c>EnableRetryOnFailure()</c> for other kinds of transient failures, since there's no
+/// network involved for an embedded database, so an EF execution-strategy retry loop on top
+/// of the busy timeout would add nothing.
 /// </summary>
-public sealed class SqliteEventStore : IEventStore
+public sealed class SqliteEventStore(IDbContextFactory<SqliteNostrRelayDbContext> contextFactory)
+    : IEventStore
 {
-    private readonly PooledDbContextFactory<NostrRelayDbContext> _contextFactory;
-
-    public SqliteEventStore(string connectionString)
-    {
-        var builder = new SqliteConnectionStringBuilder(connectionString) { ForeignKeys = true };
-
-        var optionsBuilder = new DbContextOptionsBuilder<NostrRelayDbContext>();
-        optionsBuilder.UseSqlite(builder.ConnectionString);
-        _contextFactory = new PooledDbContextFactory<NostrRelayDbContext>(optionsBuilder.Options);
-    }
-
     public async Task InitializeAsync(CancellationToken ct = default)
     {
-        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
+        await using SqliteNostrRelayDbContext context = await contextFactory.CreateDbContextAsync(ct);
         await context.Database.MigrateAsync(ct);
         await context.Database.ExecuteSqlRawAsync("PRAGMA journal_mode = WAL;", ct);
     }
@@ -56,7 +50,7 @@ public sealed class SqliteEventStore : IEventStore
         if (category == NostrEventKindCategory.Ephemeral)
             return PersistResult.Ephemeral();
 
-        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
+        await using SqliteNostrRelayDbContext context = await contextFactory.CreateDbContextAsync(ct);
 
         return category switch
         {
@@ -67,11 +61,18 @@ public sealed class SqliteEventStore : IEventStore
         };
     }
 
-    private static async Task<PersistResult> SaveRegularAsync(NostrRelayDbContext context, NostrEvent evt, CancellationToken ct)
+    private static async Task<PersistResult> SaveRegularAsync(SqliteNostrRelayDbContext context, NostrEvent evt, CancellationToken ct)
     {
-        // id is the primary key, so a regular event is naturally deduplicated by insert.
-        // EF/SaveChanges has no "INSERT OR IGNORE"; a constraint violation on save is
-        // caught and treated as the duplicate signal instead, same outcome, one round trip.
+        // Duplicate publishes are a common, expected outcome in Nostr (clients routinely
+        // re-broadcast the same event to multiple relays), so this checks for an existing
+        // row by primary key up front rather than relying on a constraint-violation
+        // exception as the primary detection mechanism: exception-based control flow on a
+        // hot, frequently-hit path carries real overhead (exception construction,
+        // unwinding, Sqlite's exception translation) that a plain existence check avoids.
+        bool exists = await context.Events.AsNoTracking().AnyAsync(e => e.Id == evt.Id, ct);
+        if (exists)
+            return PersistResult.Duplicate();
+
         context.Events.Add(evt.ToEntity());
         context.EventTags.AddRange(evt.ToTagEntities());
 
@@ -81,19 +82,22 @@ public sealed class SqliteEventStore : IEventStore
         }
         catch (DbUpdateException ex) when (IsConstraintViolation(ex))
         {
+            // Only reachable if another writer inserted the same id in the window between
+            // the check above and this insert. Rare, so the exception path here is a
+            // correctness fallback, not the mechanism the common case goes through.
             return PersistResult.Duplicate();
         }
 
         return PersistResult.Stored();
     }
 
-    private static Task<PersistResult> SaveReplaceableAsync(NostrRelayDbContext context, NostrEvent evt, CancellationToken ct) =>
+    private static Task<PersistResult> SaveReplaceableAsync(SqliteNostrRelayDbContext context, NostrEvent evt, CancellationToken ct) =>
         SaveKeyedAsync(
             context, evt, ct,
             lookup: q => q.Where(e => e.Pubkey == evt.Pubkey && e.Kind == evt.Kind),
             delete: q => q.Where(e => e.Pubkey == evt.Pubkey && e.Kind == evt.Kind));
 
-    private static Task<PersistResult> SaveAddressableAsync(NostrRelayDbContext context, NostrEvent evt, CancellationToken ct)
+    private static Task<PersistResult> SaveAddressableAsync(SqliteNostrRelayDbContext context, NostrEvent evt, CancellationToken ct)
     {
         var dTag = evt.GetFirstTagValue("d") ?? "";
 
@@ -104,11 +108,10 @@ public sealed class SqliteEventStore : IEventStore
     }
 
     /// <summary>
-    /// Shared upsert-by-key logic for replaceable and addressable events (Section 3.3),
-    /// the EF counterpart of the old Dapper <c>SaveKeyedAsync</c>. Still lookup-then-
-    /// delete-then-insert, same rationale as before: this table's primary key is the
-    /// Nostr event id, which changes with every version, so there's no single row to
-    /// "update in place".
+    /// Shared upsert-by-key logic for replaceable and addressable events (Section 3.3).
+    /// Still lookup-then-delete-then-insert, same rationale as before: this table's
+    /// primary key is the Nostr event id, which changes with every version, so there's no
+    /// single row to "update in place".
     ///
     /// The transaction is opened directly on the underlying <see cref="SqliteConnection"/>
     /// with <c>deferred: false</c> (BEGIN IMMEDIATE), not via
@@ -118,10 +121,13 @@ public sealed class SqliteEventStore : IEventStore
     /// write statement, so two concurrent writers could both pass the lookup believing
     /// they're first. <see cref="DatabaseFacade.UseTransactionAsync"/> then hands that
     /// externally-opened transaction to EF so the LINQ lookup, the delete, and
-    /// <c>SaveChangesAsync</c> all participate in the same one.
+    /// <c>SaveChangesAsync</c> all participate in the same one. No execution-strategy
+    /// wrapping is needed around this transaction, unlike the Postgres store's equivalent:
+    /// no retrying provider is configured here (see this class's doc comment), so there's
+    /// nothing that would conflict with an explicit transaction.
     /// </summary>
     private static async Task<PersistResult> SaveKeyedAsync(
-        NostrRelayDbContext context,
+        SqliteNostrRelayDbContext context,
         NostrEvent evt,
         CancellationToken ct,
         Func<IQueryable<NostrEventEntity>, IQueryable<NostrEventEntity>> lookup,
@@ -180,31 +186,48 @@ public sealed class SqliteEventStore : IEventStore
         if (filters.Count == 0)
             yield break;
 
-        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
-        var seenIds = new HashSet<string>();
-        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        // Results are fully materialized before the context (and its underlying
+        // connection) is released, rather than yielding directly from the open context.
+        // Yielding from an open context would hold the connection open for as long as the
+        // slowest downstream consumer takes to drain, and the server's own backpressure
+        // design (Section 5.3) means a slow subscriber's outbound channel can back up for a
+        // while, which risks holding a pooled context (and, transitively, a write-capable
+        // connection under WAL) longer than necessary. Each filter's own Limit (default
+        // 500) bounds how much this buffers in memory.
+        List<NostrEvent> results;
 
-        // Filters are OR'd (Section 3.4): each is queried independently, respecting its
-        // own `limit`, and results are deduplicated by id as they stream out, same
-        // filter-by-filter concatenation (not a globally merge-sorted stream) as before.
-        foreach (NostrFilter filter in filters)
+        await using (SqliteNostrRelayDbContext context = await contextFactory.CreateDbContextAsync(ct))
         {
-            var query = SqliteEventQueryBuilder.Build(context, filter, now)
-                .OrderByDescending(e => e.CreatedAt)
-                .ThenBy(e => e.Id)
-                .Take(filter.Limit ?? 500);
+            var seenIds = new HashSet<string>();
+            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            results = [];
 
-            await foreach (NostrEventEntity entity in query.AsAsyncEnumerable().WithCancellation(ct))
+            // Filters are OR'd (Section 3.4): each is queried independently, respecting
+            // its own `limit`, and results are deduplicated by id as they're collected,
+            // same filter-by-filter concatenation (not a globally merge-sorted stream) as
+            // before.
+            foreach (NostrFilter filter in filters)
             {
-                if (seenIds.Add(entity.Id))
-                    yield return entity.ToDomain();
+                var query = SqliteEventQueryBuilder.Build(context, filter, now)
+                    .OrderByDescending(e => e.CreatedAt)
+                    .ThenBy(e => e.Id)
+                    .Take(filter.Limit ?? 500);
+
+                await foreach (NostrEventEntity entity in query.AsAsyncEnumerable().WithCancellation(ct))
+                {
+                    if (seenIds.Add(entity.Id))
+                        results.Add(entity.ToDomain());
+                }
             }
         }
+
+        foreach (NostrEvent evt in results)
+            yield return evt;
     }
 
     public async Task<long> CountAsync(NostrFilter filter, CancellationToken ct)
     {
-        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
+        await using SqliteNostrRelayDbContext context = await contextFactory.CreateDbContextAsync(ct);
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
         return await SqliteEventQueryBuilder.Build(context, filter, now).CountAsync(ct);
@@ -216,7 +239,7 @@ public sealed class SqliteEventStore : IEventStore
         if (ids.Count == 0)
             return;
 
-        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
+        await using SqliteNostrRelayDbContext context = await contextFactory.CreateDbContextAsync(ct);
         await context.Events.Where(e => ids.Contains(e.Id)).ExecuteDeleteAsync(ct);
     }
 
@@ -226,7 +249,7 @@ public sealed class SqliteEventStore : IEventStore
         if (ids.Count == 0)
             return;
 
-        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
+        await using SqliteNostrRelayDbContext context = await contextFactory.CreateDbContextAsync(ct);
 
         // "kind != 5" enforces NIP-09's "deletion request against a deletion request has
         // no effect": a kind-5 row is never deletable through this path.
@@ -237,7 +260,7 @@ public sealed class SqliteEventStore : IEventStore
 
     public async Task DeleteAddressableEventAsync(string pubkey, int kind, string dTag, long upToCreatedAt, CancellationToken ct)
     {
-        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
+        await using SqliteNostrRelayDbContext context = await contextFactory.CreateDbContextAsync(ct);
 
         await context.Events
             .Where(e => e.Pubkey == pubkey && e.Kind == kind && e.DTag == dTag && e.CreatedAt <= upToCreatedAt)
@@ -246,7 +269,7 @@ public sealed class SqliteEventStore : IEventStore
 
     public async Task DeleteExpiredEventsAsync(CancellationToken ct)
     {
-        await using NostrRelayDbContext context = await _contextFactory.CreateDbContextAsync(ct);
+        await using SqliteNostrRelayDbContext context = await contextFactory.CreateDbContextAsync(ct);
         var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
         await context.Events

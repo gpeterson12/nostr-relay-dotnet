@@ -23,7 +23,7 @@ namespace NostrRelay.Storage.Postgres;
 /// </summary>
 internal static class PostgresEventQueryBuilder
 {
-    public static IQueryable<NostrEventEntity> Build(NostrRelayDbContext context, NostrFilter filter, long nowUnixSeconds)
+    public static IQueryable<NostrEventEntity> Build(PostgresNostrRelayDbContext context, NostrFilter filter, long nowUnixSeconds)
     {
         var query = context.Events.AsNoTracking();
 

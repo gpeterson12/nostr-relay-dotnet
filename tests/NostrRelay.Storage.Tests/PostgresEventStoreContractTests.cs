@@ -1,3 +1,5 @@
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Npgsql;
 using NostrRelay.Storage.Abstractions;
 using NostrRelay.Storage.Postgres;
@@ -27,6 +29,14 @@ namespace NostrRelay.Storage.Tests;
 /// same reasoning as <see cref="PostgresDatabaseProvisioner"/>, this is database-level DDL
 /// outside anything EF models, and Dapper is no longer a dependency of the Postgres
 /// project this test project references.
+///
+/// <see cref="PostgresEventStore"/> now takes its <see cref="NpgsqlDataSource"/> and
+/// <see cref="IDbContextFactory{TContext}"/> via constructor injection rather than
+/// building them itself (see that class's doc comment), so <see cref="CreateStoreAsync"/>
+/// builds the same two pieces <c>Program.cs</c>'s DI registration would, directly, without
+/// needing a full <see cref="IServiceProvider"/> just to satisfy the constructor. Because
+/// the data source is no longer owned/disposed by <see cref="PostgresEventStore"/> itself,
+/// this test owns it instead and disposes it in <see cref="DisposeStoreAsync"/>.
 /// </summary>
 public sealed class PostgresEventStoreContractTests : EventStoreContractTests
 {
@@ -36,6 +46,7 @@ public sealed class PostgresEventStoreContractTests : EventStoreContractTests
         Environment.GetEnvironmentVariable("NOSTR_RELAY_TEST_POSTGRES_CONNECTION_STRING") ?? DefaultConnectionString;
 
     private string _schemaName = "";
+    private NpgsqlDataSource? _dataSource;
 
     protected override async Task<IEventStore> CreateStoreAsync()
     {
@@ -57,13 +68,26 @@ public sealed class PostgresEventStoreContractTests : EventStoreContractTests
         }
 
         var isolatedConnectionString = $"{BaseConnectionString};SearchPath={_schemaName}";
-        var store = new PostgresEventStore(isolatedConnectionString);
+
+        _dataSource = NpgsqlDataSource.Create(isolatedConnectionString);
+
+        var optionsBuilder = new DbContextOptionsBuilder<PostgresNostrRelayDbContext>();
+        optionsBuilder.UseNpgsql(_dataSource, npgsqlOptions => npgsqlOptions.EnableRetryOnFailure());
+        var contextFactory = new PooledDbContextFactory<PostgresNostrRelayDbContext>(optionsBuilder.Options);
+
+        var store = new PostgresEventStore(contextFactory, _dataSource);
         await store.InitializeAsync();
         return store;
     }
 
     protected override async Task DisposeStoreAsync()
     {
+        // Dispose the data source before dropping the schema, so any pooled connections
+        // it's still holding are released rather than potentially holding a lock that
+        // would make the DROP SCHEMA below block or fail.
+        if (_dataSource is not null)
+            await _dataSource.DisposeAsync();
+
         await using var connection = new NpgsqlConnection(BaseConnectionString);
         await connection.OpenAsync();
         await using var dropSchemaCommand =
