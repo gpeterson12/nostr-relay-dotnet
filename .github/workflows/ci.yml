@@ -56,3 +56,41 @@ jobs:
         with:
           name: test-results
           path: TestResults
+
+  # Separate job because it shares nothing with the test job: no Postgres service, no SDK
+  # setup, no restore cache. It exists so a Dockerfile that stops building is caught here
+  # rather than the next time someone tries to deploy.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build --tag nostr-relay:ci .
+
+      - name: Smoke test the image
+        run: |
+          docker run --detach --name nostr-relay-ci --publish 8080:8080 nostr-relay:ci
+
+          # The image's own HEALTHCHECK exercises /health, which in turn exercises real
+          # storage connectivity, so waiting for "healthy" proves the relay came up and
+          # migrated its SQLite database, not merely that the process started.
+          for _ in $(seq 1 30); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' nostr-relay-ci)
+            [ "$status" = "healthy" ] && break
+            [ "$status" = "unhealthy" ] && break
+            sleep 2
+          done
+
+          if [ "$(docker inspect --format '{{.State.Health.Status}}' nostr-relay-ci)" != "healthy" ]; then
+            docker logs nostr-relay-ci
+            exit 1
+          fi
+
+          # NIP-11 content negotiation on the same root path the WebSocket uses.
+          curl --fail --silent --header 'Accept: application/nostr+json' http://localhost:8080/
+
+      - name: Container logs
+        if: failure()
+        run: docker logs nostr-relay-ci || true

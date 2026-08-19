@@ -1,16 +1,22 @@
-using System.Text.Json;
 using NostrRelay.Core;
 
-namespace NostrRelay.Storage.Sqlite;
+namespace NostrRelay.Storage.Ef;
 
 /// <summary>
-/// The single seam between <see cref="NostrEvent"/> (Core's domain type) and
-/// <see cref="NostrEventEntity"/>/<see cref="EventTagEntity"/> (EF's persistence shapes).
-/// Structurally identical to the Postgres project's mapper, kept as a separate copy per
-/// project rather than a shared abstraction, same allowance as the filter query builders
-/// (Section 3.4: "shared or parallel-but-tested component").
+/// The single seam between <see cref="NostrEvent"/> (Core's domain type) and the EF
+/// persistence shapes. Provider-agnostic and defined once, rather than copied per provider:
+/// nothing in here is engine-specific, and the JSON handling that used to live here is an EF
+/// value conversion (<see cref="NostrEventTagsConversion"/>).
+///
+/// Note what is deliberately absent: the Postgres copy of this mapper used to call
+/// <c>TrimEnd()</c> on <c>Id</c>, <c>Pubkey</c>, and <c>Sig</c> to strip the blank padding
+/// that <c>char(n)</c> columns return on read. That trimming still happens, but as a value
+/// conversion declared next to the <c>char(n)</c> column type in
+/// <c>PostgresNostrEventEntityConfiguration</c>, which is where the behavior originates. Keep
+/// it that way: the moment this mapper starts compensating for one engine's column types, it
+/// stops being shareable and the two copies grow back.
 /// </summary>
-internal static class NostrEventEntityMapper
+public static class NostrEventEntityMapper
 {
     public static NostrEventEntity ToEntity(this NostrEvent evt)
     {
@@ -22,7 +28,7 @@ internal static class NostrEventEntityMapper
             Pubkey = evt.Pubkey,
             CreatedAt = evt.CreatedAt,
             Kind = evt.Kind,
-            TagsJson = JsonSerializer.Serialize(evt.Tags),
+            Tags = evt.Tags,
             Content = evt.Content,
             Sig = evt.Sig,
             ExpiresAt = ExtractExpiresAt(evt),
@@ -36,14 +42,14 @@ internal static class NostrEventEntityMapper
         Pubkey = entity.Pubkey,
         CreatedAt = entity.CreatedAt,
         Kind = entity.Kind,
-        Tags = JsonSerializer.Deserialize<List<List<string>>>(entity.TagsJson) ?? [],
+        Tags = entity.Tags,
         Content = entity.Content,
         Sig = entity.Sig,
     };
 
     /// <summary>
     /// Builds the normalized tag rows for an event: only single ASCII-letter tag names are
-    /// indexed, matching the original InsertTagsAsync filter.
+    /// indexed, per NIP-01's single-letter filter convention.
     /// <see cref="EventTagEntity.Id"/> is left unset; the database assigns it on insert.
     /// </summary>
     public static List<EventTagEntity> ToTagEntities(this NostrEvent evt) =>

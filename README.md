@@ -5,9 +5,11 @@ A production-grade [Nostr](https://github.com/nostr-protocol/nostr) relay writte
 [![CI](https://github.com/gpeterson12/nostr-relay-dotnet/actions/workflows/ci.yml/badge.svg)](https://github.com/gpeterson12/nostr-relay-dotnet/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-> **Status: active development, first README draft.** Milestones 1–9 are complete; Milestone 11
-> (benchmarking) is in progress. See [Known Gaps & Roadmap](#known-gaps--roadmap) for exactly
-> what's built, what's deferred, and why.
+> **Status: active development.** Milestones 1-9 are complete, Docker packaging is done, and
+> Milestone 11 (benchmarking) is in progress. See [Known Gaps & Roadmap](#known-gaps--roadmap)
+> for exactly what's built, what's deferred, and why. Notably, the relay has **not** yet been
+> validated against the live Nostr network or a real client; everything below is verified
+> against the test suite and manual `curl`/`nak`/`websocat` sessions.
 
 ## Why this exists
 
@@ -94,41 +96,72 @@ never the bus or any other connection.
 
 `IEventStore` is the seam between protocol logic and persistence. Two implementations exist -
 `SqliteEventStore` and `PostgresEventStore` - both proven behaviorally identical by a single
-shared contract test suite (`EventStoreContractTests`, 30 tests, run unmodified against both
+shared contract test suite (`EventStoreContractTests`, 36 tests, run unmodified against both
 providers). They reach that identical behavior by genuinely different means where the underlying
 engines differ: SQLite uses a whole-database `BEGIN IMMEDIATE` write lock for replaceable/
 addressable event upserts, Postgres uses a per-key `pg_advisory_xact_lock` instead, more
 surgical since only writers to the *same* key ever contend.
 
+Because those two mechanisms are different, claiming they produce the same guarantees is not
+something to take on trust: six of the contract tests drive concurrent writers at the same key
+(and at deliberately distinct keys) and assert on the converged end state, so a lock that is
+missing, too coarse, or scoped to the wrong unit fails on whichever provider broke.
+
 Both providers are built on EF Core (`Microsoft.EntityFrameworkCore.Sqlite` /
 `Npgsql.EntityFrameworkCore.PostgreSQL`): filters translate to LINQ against a small entity
 model rather than hand-written SQL, and schema is version-controlled as EF Core Migrations
 (`dotnet ef migrations add`), applied automatically via `Database.MigrateAsync()` on startup,
-rather than the idempotent embedded SQL scripts used earlier in the project. The 30-test
-contract suite carried that migration itself: it was written against the original Dapper-based
+rather than the idempotent embedded SQL scripts used earlier in the project. The contract
+suite carried that migration itself: it was written against the original Dapper-based
 implementations and ran unmodified against the EF Core rewrite, catching a real regression (a
 Postgres `char(n)` padding edge case) before it reached production code.
+
+The entity model itself is defined once, in `NostrRelay.Storage.Ef`, and shared by both
+providers. Mapping is supplied through `IEntityTypeConfiguration<T>`: a shared base class
+declares everything that is true on both engines, and each provider overrides a single hook
+for what genuinely differs (Postgres `char(n)`/`jsonb` column types and its two partial unique
+indexes, SQLite's plain addressable index). The `tags` column is an EF value conversion rather
+than hand-serialized JSON on both sides of the mapper, so exactly one place knows the column
+holds a JSON document.
 
 ```
 src/
   NostrRelay.Core                 # Domain: NostrEvent, NostrFilter, validation pipeline,
                                    # kind-strategy classification, crypto wrapper, wire protocol
   NostrRelay.Storage.Abstractions # IEventStore, PersistResult
-  NostrRelay.Storage.Sqlite       # First provider
+  NostrRelay.Storage.Ef           # Shared EF model: entities, value conversion, mapper,
+                                   # filter-to-LINQ builder, base configurations
+  NostrRelay.Storage.Sqlite       # First provider: context, configurations, store
   NostrRelay.Storage.Postgres     # Second provider, same contract tests
   NostrRelay.Server               # ASP.NET Core host: WebSocket handling, subscriptions,
                                    # fan-out bus, policy/limits, NIP-11/health/metrics endpoints
-  NostrRelay.Cli                  # Scaffolded, not yet built out
+  NostrRelay.Cli                  # Scaffolded, not yet built out                                   
 tests/
   NostrRelay.Core.Tests
-  NostrRelay.Storage.Tests        # Contract tests, run against both providers
+  NostrRelay.Storage.Tests        # Contract tests (incl. concurrency), run against both providers
   NostrRelay.Server.IntegrationTests  # Real WebSocket client against an in-memory host
   NostrRelay.Benchmarks           # BenchmarkDotNet micro-benchmarks
 ```
 
 ## Quickstart
 
-Docker packaging is planned (Milestone 12) but not built yet - for now, run directly:
+### Docker
+
+```bash
+# SQLite, data persisted on a named volume
+docker build -t nostr-relay .
+docker run -p 8080:8080 -v nostr-relay-data:/data nostr-relay
+
+# Postgres-backed, relay plus database
+docker compose up --build
+```
+
+The image runs as a non-root user and declares a `HEALTHCHECK` against `/health`, which
+exercises real storage connectivity, so a container reporting healthy has actually reached its
+database rather than merely bound a port. Configuration is environment variables using the .NET
+double-underscore separator, for example `Storage__Provider=Postgres`.
+
+### Running from source
 
 ```bash
 # SQLite (default, zero setup - the .db file is created automatically on first run)
@@ -215,7 +248,7 @@ dotnet test tests/NostrRelay.Server.IntegrationTests
 dotnet test --filter "FullyQualifiedName~SubscriptionRegistry"
 ```
 
-`NostrRelay.Storage.Tests` runs the same 30-test contract suite against both SQLite (a fresh
+`NostrRelay.Storage.Tests` runs the same 36-test contract suite against both SQLite (a fresh
 temp-file database per test, deleted after) and Postgres (a dedicated dropped-after schema per
 test, inside one shared database). Postgres tests need a reachable server:
 
@@ -231,7 +264,7 @@ setup differs from Postgres.app's defaults (`Host=localhost;Database=nostr_relay
 | Layer | What's covered |
 |---|---|
 | `Core.Tests` | Canonical ID serialization, Schnorr sign/verify round-trips, the full validation pipeline, wire-format (de)serialization, kind classification, NIP-09 deletion parsing, NIP-40 expiration checks, policy allow/blocklists |
-| `Storage.Tests` | Full `IEventStore` contract: all four kind-category persistence strategies, filter/tag/time-range/limit querying, NIP-09 deletion (both `e` and `a` tag forms), NIP-40 query-time exclusion and sweep, run against SQLite *and* Postgres |
+| `Storage.Tests` | Full `IEventStore` contract: all four kind-category persistence strategies, filter/tag/time-range/limit querying, NIP-09 deletion (both `e` and `a` tag forms), NIP-40 query-time exclusion and sweep, plus concurrent writers at the same and at deliberately distinct replaceable/addressable keys, run against SQLite *and* Postgres |
 | `Server.IntegrationTests` | Real WebSocket client against an in-memory `WebApplicationFactory` host: full protocol flows, live fan-out across separate connections, kind-strategy behavior end-to-end (not just at the storage layer), NIP-11/health/metrics HTTP endpoints, rate limiting, allowlist/blocklist, timestamp sanity, deletion, expiration |
 
 ## Benchmarks
@@ -323,10 +356,11 @@ Honest accounting of what's deferred, what's missing, and why - not a changelog.
 - **NIP-42 auth, NIP-45 counts, NIP-50 search, NIP-13 proof-of-work, NIP-65 relay lists -
   Milestone 13, not started.** `AUTH` and `COUNT` client messages currently receive a `NOTICE`
   saying they're not yet supported, rather than being silently ignored.
-- **Docker/docker-compose packaging, `ARCHITECTURE.md`, deployment to a public endpoint, and
-  interop validation against a real client (Damus/Amethyst/etc.) - Milestone 12, not started.**
-  Everything in this repo has been validated against its own test suite and manual `curl`/`nak`/
-  `websocat` sessions, not yet against the live Nostr network.
+- **`ARCHITECTURE.md`, deployment to a public endpoint, and interop validation against a real
+  client (Damus/Amethyst/etc.) - rest of Milestone 12, not started.** Everything in this repo
+  has been validated against its own test suite and manual `curl`/`nak`/`websocat` sessions, not
+  yet against the live Nostr network. Docker and docker-compose packaging is done, see
+  [Quickstart](#quickstart).
 - **Load-test harness for concurrent-connection and ingestion-latency targets - rest of
   Milestone 11.** The BenchmarkDotNet results above cover CPU-bound micro-benchmarks; they don't
   exercise real concurrent WebSocket connections, network I/O, or sustained throughput.
@@ -335,7 +369,9 @@ Honest accounting of what's deferred, what's missing, and why - not a changelog.
 
 - **SQLite's `BEGIN IMMEDIATE` write lock** for replaceable/addressable upserts is a
   whole-database lock, correct but coarser than Postgres's per-key advisory lock. Fine for
-  SQLite's typical embedded/single-writer use case; untested under heavy concurrent write load.
+  SQLite's typical embedded/single-writer use case. Correctness under contention is covered by
+  the concurrency contract tests; throughput under sustained concurrent write load is not, and
+  needs the load-test harness above.
 - **`EventFanOutService` iterates matching subscriptions sequentially**, not via
   `Parallel.ForEachAsync`. The spec calls out parallel dispatch as a benchmark-driven
   optimization, not a correctness requirement - the subscription fan-out benchmark above (0.486

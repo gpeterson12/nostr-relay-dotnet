@@ -1,0 +1,18 @@
+# Anything the build does not need is excluded, both to keep the build context small and to
+# make sure a stale local bin/obj can never leak into an image.
+**/bin/
+**/obj/
+**/TestResults/
+**/*.user
+**/*.db
+**/*.db-wal
+**/*.db-shm
+.git/
+.github/
+.vs/
+.idea/
+tests/
+*.md
+Dockerfile
+.dockerignore
+docker-compose.yml

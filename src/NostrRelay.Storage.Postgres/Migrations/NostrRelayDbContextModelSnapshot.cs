@@ -51,7 +51,7 @@ namespace NostrRelay.Storage.Postgres.Migrations
 
                     b.HasIndex(new[] { "TagName", "TagValue" }, "idx_event_tags_name_value");
 
-                    b.ToTable("event_tags");
+                    b.ToTable("event_tags", (string)null);
                 });
 
             modelBuilder.Entity("NostrRelay.Storage.Postgres.NostrEventEntity", b =>
@@ -116,7 +116,7 @@ namespace NostrRelay.Storage.Postgres.Migrations
 
                     b.HasIndex(new[] { "Pubkey", "Kind" }, "idx_events_pubkey_kind");
 
-                    b.ToTable("events");
+                    b.ToTable("events", (string)null);
                 });
 
             modelBuilder.Entity("NostrRelay.Storage.Postgres.EventTagEntity", b =>

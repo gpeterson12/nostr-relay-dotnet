@@ -5,6 +5,7 @@ using Microsoft.Extensions.Options;
 using Npgsql;
 using NostrRelay.Core;
 using NostrRelay.Storage.Abstractions;
+using NostrRelay.Storage.Ef;
 
 namespace NostrRelay.Storage.Postgres;
 
@@ -85,9 +86,9 @@ public sealed class PostgresEventStore(
         }
         catch (DbUpdateException ex) when (IsUniqueViolation(ex))
         {
-            // Only reachable if another writer inserted the same id in the window between
-            // the check above and this insert. Rare, so the exception path here is a
-            // correctness fallback, not the mechanism the common case goes through.
+            // Reached when another writer inserted the same id in the window between the
+            // check above and this insert. Rare in normal operation, but a real race:
+            // EventStoreContractTests covers it explicitly with concurrent writers.
             return PersistResult.Duplicate();
         }
 
@@ -199,7 +200,7 @@ public sealed class PostgresEventStore(
 
             foreach (NostrFilter filter in filters)
             {
-                var query = PostgresEventQueryBuilder.Build(context, filter, now)
+                var query = NostrEventQueryBuilder.Build(context, filter, now)
                     .OrderByDescending(e => e.CreatedAt)
                     .ThenBy(e => e.Id)
                     .Take(filter.Limit ?? 500);
@@ -221,7 +222,7 @@ public sealed class PostgresEventStore(
         await using PostgresNostrRelayDbContext context = await contextFactory.CreateDbContextAsync(ct);
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-        return await PostgresEventQueryBuilder.Build(context, filter, now).CountAsync(ct);
+        return await NostrEventQueryBuilder.Build(context, filter, now).CountAsync(ct);
     }
 
     public async Task DeleteEventsAsync(IEnumerable<string> eventIds, CancellationToken ct)

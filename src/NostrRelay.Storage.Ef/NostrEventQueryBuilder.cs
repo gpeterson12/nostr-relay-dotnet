@@ -1,23 +1,23 @@
-using Microsoft.EntityFrameworkCore;
 using NostrRelay.Core;
+using Microsoft.EntityFrameworkCore;
 
-namespace NostrRelay.Storage.Sqlite;
+namespace NostrRelay.Storage.Ef;
 
 /// <summary>
-/// Filter-to-LINQ translation (Section 3.4), the EF era's counterpart to the old
-/// <c>SqliteFilterSqlBuilder</c>'s hand-written SQL.
+/// Filter-to-LINQ translation (Section 3.4), now defined once for every provider. The two
+/// previous copies were already identical line for line; the only reason they existed
+/// separately was that each was typed against its own provider's context, which the shared
+/// <see cref="NostrRelayDbContext"/> base removes.
 ///
-/// Matching is exact-equality throughout for <c>ids</c>/<c>authors</c>, not prefix
-/// matching, per the original builder's own stated rationale: current NIP-01 text
-/// requires "exact 64-character lowercase hex values" for these fields. That's why this
-/// uses plain <c>Contains</c> (translates to SQL <c>IN</c>) rather than a per-item
-/// <c>StartsWith</c> expression. <c>Contains</c> against a closure-captured list is also
-/// the one collection-membership pattern EF Core reliably translates to SQL, no need for
-/// the hand-built expression tree the Postgres builder uses for prefix matching.
+/// Matching is exact equality for <c>ids</c> and <c>authors</c>, not prefix matching:
+/// NIP-01 requires those filter lists to contain exact 64-character lowercase hex values.
+/// <c>Contains</c> against a closure-captured collection is the membership pattern both
+/// providers translate natively (SQL <c>IN</c> on SQLite, <c>= ANY(...)</c> on Npgsql), so
+/// no hand-built expression trees are needed.
 /// </summary>
-internal static class SqliteEventQueryBuilder
+public static class NostrEventQueryBuilder
 {
-    public static IQueryable<NostrEventEntity> Build(SqliteNostrRelayDbContext context, NostrFilter filter, long nowUnixSeconds)
+    public static IQueryable<NostrEventEntity> Build(NostrRelayDbContext context, NostrFilter filter, long nowUnixSeconds)
     {
         var query = context.Events.AsNoTracking();
 
@@ -50,7 +50,8 @@ internal static class SqliteEventQueryBuilder
         }
 
         // NIP-40: "Relays SHOULD NOT send expired events to clients, even if they are
-        // stored." Enforced on every query unconditionally, matching the old raw-SQL builder.
+        // stored." Enforced on every query unconditionally, independent of whether the
+        // background sweep has run recently.
         return query.Where(e => e.ExpiresAt == null || e.ExpiresAt > nowUnixSeconds);
     }
 }

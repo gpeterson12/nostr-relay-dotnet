@@ -1,22 +1,18 @@
 using Microsoft.EntityFrameworkCore;
+using NostrRelay.Storage.Ef;
 
 namespace NostrRelay.Storage.Sqlite;
 
 /// <summary>
-/// EF Core context for the SQLite event store. Unlike the Postgres side, every index in
-/// this schema (see 003_create_indexes.sql) is a plain, unfiltered index, no partial
-/// uniques, no GIN, so there's nothing left over that data annotations on
-/// <see cref="NostrEventEntity"/>/<see cref="EventTagEntity"/> can't express, and no
-/// <c>OnModelCreating</c> override is needed at all.
-///
-/// One context per operation (Section 5.2's "connection per operation" carried over to EF):
-/// <see cref="SqliteEventStore"/> creates and disposes an instance per call via a
-/// <see cref="PooledDbContextFactory{TContext}"/>. This type itself stays a plain,
-/// DI-agnostic <see cref="DbContext"/> with a public constructor taking
-/// <see cref="DbContextOptions{TContext}"/>.
+/// EF Core context for the SQLite event store. Entity sets live on
+/// <see cref="NostrRelayDbContext"/>; all mapping comes from the
+/// <c>IEntityTypeConfiguration</c> implementations in this assembly, which extend the
+/// shared configuration bases. A provider-specific context type is still required because
+/// EF keys migration history to a concrete context.
 /// </summary>
-public sealed class SqliteNostrRelayDbContext(DbContextOptions<SqliteNostrRelayDbContext> options) : DbContext(options)
+public sealed class SqliteNostrRelayDbContext(DbContextOptions<SqliteNostrRelayDbContext> options)
+    : NostrRelayDbContext(options)
 {
-    public DbSet<NostrEventEntity> Events => Set<NostrEventEntity>();
-    public DbSet<EventTagEntity> EventTags => Set<EventTagEntity>();
+    protected override void OnModelCreating(ModelBuilder modelBuilder) =>
+        modelBuilder.ApplyConfigurationsFromAssembly(typeof(SqliteNostrRelayDbContext).Assembly);
 }

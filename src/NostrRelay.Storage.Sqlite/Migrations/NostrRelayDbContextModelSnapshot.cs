@@ -44,7 +44,7 @@ namespace NostrRelay.Storage.Sqlite.Migrations
 
                     b.HasIndex(new[] { "TagName", "TagValue" }, "idx_event_tags_name_value");
 
-                    b.ToTable("event_tags");
+                    b.ToTable("event_tags", (string)null);
                 });
 
             modelBuilder.Entity("NostrRelay.Storage.Sqlite.NostrEventEntity", b =>
@@ -101,7 +101,7 @@ namespace NostrRelay.Storage.Sqlite.Migrations
 
                     b.HasIndex(new[] { "Pubkey", "Kind", "DTag" }, "idx_events_pubkey_kind_dtag");
 
-                    b.ToTable("events");
+                    b.ToTable("events", (string)null);
                 });
 
             modelBuilder.Entity("NostrRelay.Storage.Sqlite.EventTagEntity", b =>

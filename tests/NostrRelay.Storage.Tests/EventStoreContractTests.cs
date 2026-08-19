@@ -5,16 +5,18 @@ namespace NostrRelay.Storage.Tests;
 
 /// <summary>
 /// Exercises <see cref="IEventStore"/> against whatever provider a subclass wires up via
-/// <see cref="CreateStoreAsync"/>. Proves behavioral parity across providers by construction:
-/// every test here runs unchanged against SQLite now and Postgres once Milestone 6 adds a
-/// <c>PostgresEventStoreContractTests : EventStoreContractTests</c>.
+/// <see cref="CreateStoreAsync"/>. Proves behavioral parity across providers by
+/// construction: every test here runs unchanged against SQLite and Postgres. The
+/// concurrent-writer half of the contract lives in the
+/// <c>EventStoreContractTests.Concurrency.cs</c> partial, and covers the races the
+/// single-threaded tests below cannot reach.
 ///
 /// Events here don't need valid signatures: the storage contract explicitly does not
 /// re-validate id/signature (that's <see cref="Core.Validation.EventValidationPipeline"/>'s
 /// job, upstream of the store), so test events use simple readable placeholder hex-ish
 /// strings rather than real cryptographic material.
 /// </summary>
-public abstract class EventStoreContractTests : IAsyncLifetime
+public abstract partial class EventStoreContractTests : IAsyncLifetime
 {
     private IEventStore Store { get; set; } = null!;
 

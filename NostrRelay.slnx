@@ -5,13 +5,16 @@
     <File Path="global.json" />
     <File Path="README.md" />
     <File Path="Directory.Build.props" />
+    <File Path="Dockerfile" />
+    <File Path="docker-compose.yml" />
+    <File Path=".dockerignore" />
     <File Path=".github\workflows\ci.yml" />
   </Folder>
   <Folder Name="/src/">
-    <Project Path="src/NostrRelay.Cli/NostrRelay.Cli.csproj" />
     <Project Path="src/NostrRelay.Core/NostrRelay.Core.csproj" />
     <Project Path="src/NostrRelay.Server/NostrRelay.Server.csproj" />
     <Project Path="src/NostrRelay.Storage.Abstractions/NostrRelay.Storage.Abstractions.csproj" />
+    <Project Path="src/NostrRelay.Storage.Ef/NostrRelay.Storage.Ef.csproj" />
     <Project Path="src/NostrRelay.Storage.Postgres/NostrRelay.Storage.Postgres.csproj" />
     <Project Path="src/NostrRelay.Storage.Sqlite/NostrRelay.Storage.Sqlite.csproj" />
   </Folder>

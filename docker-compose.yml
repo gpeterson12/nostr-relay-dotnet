@@ -1,0 +1,37 @@
+# Postgres-backed relay, the configuration closest to how this would actually be deployed.
+#
+# For the zero-dependency SQLite path instead, skip compose entirely:
+#   docker build -t nostr-relay .
+#   docker run -p 8080:8080 -v nostr-relay-data:/data nostr-relay
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: nostr_relay
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  relay:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      # Double underscore is the .NET configuration provider's section separator, so these
+      # bind to the same Storage/Limits sections appsettings.json declares.
+      Storage__Provider: Postgres
+      Storage__ConnectionString: "Host=postgres;Port=5432;Username=postgres;Password=postgres;Database=nostr_relay"
+    depends_on:
+      postgres:
+        # Waits for Postgres to accept connections, not merely to start. The relay runs EF
+        # migrations during host startup and would otherwise fail its first connection
+        # attempt on a cold stack.
+        condition: service_healthy
+
+volumes:
+  postgres-data:

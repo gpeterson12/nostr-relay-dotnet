@@ -1,7 +1,8 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\NostrRelay.Storage.Abstractions\NostrRelay.Storage.Abstractions.csproj" />
+    <ProjectReference Include="..\NostrRelay.Storage.Ef\NostrRelay.Storage.Ef.csproj" />
     <ProjectReference Include="..\NostrRelay.Core\NostrRelay.Core.csproj" />
   </ItemGroup>
 
@@ -11,7 +12,7 @@
     <!--
       Design-time only: powers `dotnet ef migrations add`. Not needed at runtime, hence
       PrivateAssets="all" so it never flows into anything that references this project.
-    -->    
+    -->
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.11">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
