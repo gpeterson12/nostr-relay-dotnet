@@ -19,7 +19,7 @@ It also happened to fill a real gap. At the time this project began, not a ton o
 
 This is also a portfolio piece. I wanted something that would let me show senior-level .NET and Entity Framework work, not just talk about it. Clean architecture, concurrency correctness, measurable performance, dual-datastore support with EF Core migrations behind both, comprehensive testing, and observability. Not just CRUD-over-HTTP.
 
-It's built to actually work. It accepts connections from real Nostr clients (Damus, Amethyst, Primal, Coracle, etc.) and interoperates with the live network, not just its own test suite.
+It's built to actually work, not just pass its own test suite: WebSocket protocol handling, event validation, and storage are all exercised through real client sessions using `curl`, `nak`, and `websocat` against a running instance. Validation against real-world clients (Damus, Amethyst, Primal, Coracle, etc.) and the live network is the next step, see [Known Gaps & Roadmap](#known-gaps--roadmap).
 
 ## Supported NIPs
 
@@ -96,7 +96,7 @@ never the bus or any other connection.
 
 `IEventStore` is the seam between protocol logic and persistence. Two implementations exist -
 `SqliteEventStore` and `PostgresEventStore` - both proven behaviorally identical by a single
-shared contract test suite (`EventStoreContractTests`, 36 tests, run unmodified against both
+shared contract test suite (`EventStoreContractTests`, tests, run unmodified against both
 providers). They reach that identical behavior by genuinely different means where the underlying
 engines differ: SQLite uses a whole-database `BEGIN IMMEDIATE` write lock for replaceable/
 addressable event upserts, Postgres uses a per-key `pg_advisory_xact_lock` instead, more
@@ -248,7 +248,7 @@ dotnet test tests/NostrRelay.Server.IntegrationTests
 dotnet test --filter "FullyQualifiedName~SubscriptionRegistry"
 ```
 
-`NostrRelay.Storage.Tests` runs the same 36-test contract suite against both SQLite (a fresh
+`NostrRelay.Storage.Tests` runs the same test contract suite against both SQLite (a fresh
 temp-file database per test, deleted after) and Postgres (a dedicated dropped-after schema per
 test, inside one shared database). Postgres tests need a reachable server:
 
